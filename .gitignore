@@ -1,0 +1,21 @@
+# Build output (also built as sibling dirs outside the repo, but just in case)
+/build*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Qt Creator project cache - machine-specific, not portable
+.qtcreator/
+*.user
+*.user.*
+
+# Bring-up media: phone photos, oscilloscope captures, IDE screenshots -
+# useful locally, not meant to bloat the repo with binary images
+PXL_*.jpg
+DS[0-9][0-9][0-9][0-9].BMP
+DS[0-9][0-9][0-9][0-9].png
+Bildschirmfoto_*.png
+
+# Editor/OS cruft
+*~
+.DS_Store

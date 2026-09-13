@@ -1,0 +1,13 @@
+[Unit]
+Description=One-time WiFi provisioning from /boot/firmware/wificonfig.json
+After=NetworkManager.service
+Wants=NetworkManager.service
+ConditionPathExists=/boot/firmware/wificonfig.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hub75stock-wifi-setup.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

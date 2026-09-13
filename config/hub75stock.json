@@ -1,0 +1,27 @@
+{
+  "matrix": {
+    "hardwareMapping": "regular",
+    "ledRgbSequence": "RBG",
+    "chains": [1],
+    "brightness": 100,
+    "autoDim": false,
+    "gpioSlowdown": 1,
+    "pwmBits": 11,
+    "pwmLsbNanoseconds": 250,
+    "limitRefreshHz": 100,
+    "showRefreshRate": false
+  },
+
+  "global": {
+    "updateIntervalSeconds": 60,
+    "rotationSeconds": 15,
+    "renderFps": 20,
+    "marketClosed": "grey",
+    "colorScheme": "default",
+    "showConnectivityIndicator": true
+  },
+
+  "displays": [
+    { "row": 1, "column": 1, "mode": "area", "symbols": ["IONQ"] }
+  ]
+}
