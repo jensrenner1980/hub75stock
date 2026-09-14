@@ -29,28 +29,40 @@ struct PriceBucket {
 };
 
 namespace pricedata {
-// 60 buckets * 12 minutes = a 12 hour session, comfortably covering a
-// regular trading day (including the longer European floor-trading
-// sessions - see README "Live data"), one bucket per LED column (matches
-// limits::kPanelWidth with a few columns of margin).
+// One bucket per LED column (matches limits::kPanelWidth with a few
+// columns of margin).
 constexpr int kBucketCount = 60;
+// MockDataProvider's fixed synthetic-session bucket width (60 * 12 min = a
+// 12h session). YahooDataProvider does *not* use this - it sizes its
+// buckets dynamically to whatever the real session's actual length is (see
+// its own comments), so every real session fills the full kBucketCount
+// columns regardless of how many hours that particular exchange trades -
+// a fixed width here would leave a 6.5h NYSE session filling barely half
+// the chart next to an 8.5h Xetra session filling all of it.
 constexpr int kBucketMinutes = 12;
 } // namespace pricedata
 
 // Everything one panel needs to render a single stock: current price, the
-// day's reference (opening) price for the overall trend colour, and the
-// intraday chart history. Buckets are stored oldest-first; buckets_.last()
-// is the currently-forming (still live) bucket.
+// reference price the day's change is measured against, and the intraday
+// chart history. Buckets are stored oldest-first; buckets_.last() is the
+// currently-forming (still live) bucket.
 struct StockSnapshot {
     Symbol symbol;
-    float sessionOpenPrice = 0.0f;
+    // The previous trading day's close, for YahooDataProvider - the same
+    // convention every ticker/chart site measures "daily change" against,
+    // not today's own opening print (those two can disagree substantially
+    // on a day the stock gaps at the open). MockDataProvider has no
+    // previous-day data to speak of, so uses its synthetic session's own
+    // starting price instead - conceptually the same role, just without a
+    // real "yesterday" behind it.
+    float referencePrice = 0.0f;
     float lastPrice = 0.0f;
     bool marketOpen = true;
     QVector<PriceBucket> buckets; // 0..pricedata::kBucketCount, oldest first
 
-    float dailyChange() const { return lastPrice - sessionOpenPrice; }
+    float dailyChange() const { return lastPrice - referencePrice; }
     float dailyChangePercent() const {
-        return sessionOpenPrice != 0.0f ? (dailyChange() / sessionOpenPrice) * 100.0f : 0.0f;
+        return referencePrice != 0.0f ? (dailyChange() / referencePrice) * 100.0f : 0.0f;
     }
     bool isUp() const { return dailyChange() >= 0.0f; }
     bool isValid() const { return symbol.isValid() && !buckets.isEmpty(); }

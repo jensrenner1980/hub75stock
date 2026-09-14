@@ -41,10 +41,17 @@ Color dim(const Color &c, int divisor = 4)
 // A dedicated threshold rather than comparing to exactly 0 - the mock
 // provider's random walk essentially never lands on exactly zero, but real
 // data might sit within a cent of the open without being meaningfully "up".
+// Deliberately narrow (0.01%, not the original 0.05%): the displayed change
+// figure is an absolute currency amount, not a percentage, and for a
+// higher-priced stock even a single-tick move can be a meaningfully "real"
+// change while still being a tiny percentage - confirmed for real with
+// NVD.DE (~185 EUR): a 0.10 EUR tick is 0.054%, which sat inside the wider
+// 0.05% band almost every time, so the chart stayed white on essentially
+// every real tick rather than just on genuinely-flat ones.
 Color trendColor(const StockSnapshot &snapshot)
 {
     const float changePercent = snapshot.dailyChangePercent();
-    if (std::abs(changePercent) < 0.05f)
+    if (std::abs(changePercent) < 0.01f)
         return kWhite;
     return changePercent > 0.0f ? kGreen : kRed;
 }
@@ -75,13 +82,23 @@ QString formatPrice(float price)
     return QString::number(price, 'f', 2);
 }
 
-// "+3.2" / "-12.5" - signed, 1 decimal. The sign is always shown, matching
-// the layout budget worked out for the list view (ticker + price + change
-// == 16 characters with no separators to spare).
-QString formatChange(float change)
+// "+3.2" / "-12.5" - signed percentage, 1 decimal, no "%" (added by the
+// caller if there's room - see drawHeader vs renderList). The sign is
+// always shown, matching the layout budget worked out for the list view
+// (ticker + price + change == 16 characters with no separators to spare).
+//
+// A percentage, not an absolute price difference - confirmed for real that
+// the two can tell noticeably different stories: for a higher-priced
+// stock, an absolute currency change stays visibly nonzero on essentially
+// every tick regardless of how small the actual move is, while for a
+// cheap stock even a meaningful percentage move can round to "+0.0" in
+// absolute terms. Percentage is what the colour logic already uses
+// (trendColor()) and what every ticker/chart site displays, so this also
+// fixes the two disagreeing with each other.
+QString formatChangePercent(float changePercent)
 {
-    return (change >= 0.0f ? QStringLiteral("+") : QStringLiteral("-"))
-           + QString::number(std::abs(change), 'f', 1);
+    return (changePercent >= 0.0f ? QStringLiteral("+") : QStringLiteral("-"))
+           + QString::number(std::abs(changePercent), 'f', 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +132,7 @@ void renderList(PanelView *panel, const DisplayConfig &display, const GlobalConf
         const QString text = QStringLiteral("%1 %2 %3")
                                   .arg(ticker, -4)
                                   .arg(formatPrice(snapshot->lastPrice), 6)
-                                  .arg(formatChange(snapshot->dailyChange()), 4);
+                                  .arg(formatChangePercent(snapshot->dailyChangePercent()), 4);
         rgb_matrix::DrawText(panel, font, 0, baseline, color, nullptr,
                              text.toUtf8().constData(), 0);
     }
@@ -150,7 +167,8 @@ void drawHeader(PanelView *panel, const Symbol &symbol, const StockSnapshot *sna
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline(), priceColor,
                               formatPrice(snapshot->lastPrice));
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline() + 6, changeColor,
-                              formatChange(snapshot->dailyChange()));
+                              formatChangePercent(snapshot->dailyChangePercent())
+                                  + QStringLiteral("%"));
 }
 
 // Maps a price to a chart-area row, given the [minPrice, maxPrice] range
@@ -202,18 +220,31 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         const int y = mapPriceToY(buckets.at(i).close, minPrice, maxPrice);
 
         // A segment connecting two real points that aren't in adjacent
-        // slots bridges one or more no-trades gaps - drawn in grey rather
-        // than the real trend colour, same idea as the closed-market
-        // styling: a plain line for legibility (it's still useful to see
-        // the overall day's shape without gaps chopping the chart into
-        // disconnected specks), but visually flagged as "no data here",
-        // not a claim that the price moved smoothly/gradually through a
-        // stretch we simply have no information about.
+        // slots bridges one or more no-trades gaps - drawn dimmed (not a
+        // separate colour: whatever "color" already is here, green/red/
+        // white when the market's open, grey when closed and styled that
+        // way) rather than at full brightness. Distinguishing by
+        // brightness rather than hue means this needs no special-casing
+        // against the closed-market grey styling - dim grey still reads as
+        // "different from" full grey - and doesn't reuse a colour already
+        // spoken for by the connectivity indicator. Still a plain line for
+        // legibility (it's still useful to see the overall day's shape
+        // without gaps chopping the chart into disconnected specks), but
+        // visually flagged as "no data here", not a claim that the price
+        // moved smoothly/gradually through a stretch we simply have no
+        // information about.
         const bool bridgesGap = prevX >= 0 && (i - prevIndex) > 1;
-        const Color segmentColor = bridgesGap ? kGrey : color;
+        const Color segmentColor = bridgesGap ? dim(color) : color;
 
+        // Every "x" reaching this point is a real data point's own column -
+        // the gap columns in between were already skipped via `continue`
+        // above and never get a fill drawn for them at all, bridged or not.
+        // So there's no "solid block spanning the gap" to withhold here;
+        // this is always just this one real point's own instant, and always
+        // gets its normal fill regardless of how the line reaching it is
+        // coloured.
         if (filled)
-            rgb_matrix::DrawLine(panel, x, y + 1, x, kChartBottom, dim(segmentColor));
+            rgb_matrix::DrawLine(panel, x, y + 1, x, kChartBottom, dim(color));
 
         if (prevX >= 0)
             rgb_matrix::DrawLine(panel, prevX, prevY, x, y, segmentColor);
@@ -222,6 +253,32 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         prevX = x;
         prevY = y;
         prevIndex = i;
+    }
+}
+
+// A dashed horizontal line at the reference price (previous close for real
+// data - see StockSnapshot::referencePrice), drawn before the real data so
+// it never draws over it. On an auto-scaled chart, a genuinely flat line
+// can visually amplify a tiny move into a dramatic-looking slope with
+// nothing to compare it against - this gives a fixed anchor to judge
+// "above or below where the day started from" at a glance, the same
+// mitigation most real trading chart sites use for the same reason.
+// Dashed and dimmed specifically so it reads as a background reference
+// marker, not a second data series.
+void drawReferenceLine(PanelView *panel, float referencePrice, int startColumn, int visibleCount,
+                       float minPrice, float maxPrice)
+{
+    if (referencePrice <= 0.0f)
+        return;
+    const int y = mapPriceToY(referencePrice, minPrice, maxPrice);
+    const Color lineColor = dim(kGrey, 2);
+    for (int i = 0; i < visibleCount; ++i) {
+        if (i % 2 != 0)
+            continue; // dashed, not solid - a background marker, not a data line
+        const int x = startColumn + i;
+        if (x < 0 || x >= panel->width())
+            continue;
+        panel->SetPixel(x, y, lineColor.r, lineColor.g, lineColor.b);
     }
 }
 
@@ -273,6 +330,8 @@ void drawChart(PanelView *panel, const StockSnapshot &snapshot, DisplayMode mode
     }
     if (!havePrice)
         return;
+
+    drawReferenceLine(panel, snapshot.referencePrice, startColumn, visibleCount, minPrice, maxPrice);
 
     switch (mode) {
     case DisplayMode::Candles:

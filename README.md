@@ -232,11 +232,11 @@ the exchange-native code instead (visible in some other tools, e.g. Google
 Finance's `0YB0:FRA` notation), or try it directly at
 `https://finance.yahoo.com/quote/<code>.<suffix>` for the suffix of the
 exchange you're after (`.DE` Xetra, `.F` Frankfurt, `.SG` Stuttgart, `.MU`
-Munich, `.HM` Hamburg, `.DU` Düsseldorf, ...). Prefer Xetra over Frankfurt
-for European cross-listings if both are available: Frankfurt's floor-trading
-session commonly runs longer than the fixed 60-bucket chart history can
-hold (see *Live data*), so it'd end up showing only the most recent portion
-of the day rather than the whole session from open.
+Munich, `.HM` Hamburg, `.DU` Düsseldorf, ...). Xetra vs Frankfurt for a
+European cross-listing is otherwise just a liquidity preference - the chart
+sizes its buckets to whatever that exchange's session length actually is
+(see *Live data*), so neither one runs into a fixed-width limitation the
+other doesn't.
 
 `ledRgbSequence` corrects for panels whose HUB75 connector mislabels its own
 colour channels internally - e.g. a panel whose "G" pins actually drive its
@@ -356,6 +356,35 @@ same tradeoff the classic `wpa_supplicant.conf`-on-boot-partition technique
 has), not something specific to this script - and it only matters until the
 first successful boot, after which the passphrase no longer exists in
 plaintext anywhere on the card.
+
+## Running at boot
+
+`provisioning/hub75stock.service` starts the app itself automatically on
+boot. `/etc/rc.local` is **not** a reliable way to do this on current
+Raspberry Pi OS - it's a legacy SysV-init mechanism systemd only runs
+through a compatibility shim (`rc-local.service`) that recent images often
+don't ship at all, so it can silently never fire even with a correct,
+executable, manually-runnable script. A real unit avoids that uncertainty
+entirely, and gets proper `journalctl` logging and restart-on-crash for
+free.
+
+```
+sudo cp provisioning/hub75stock.service /etc/systemd/system/
+sudo systemctl enable --now hub75stock.service
+```
+
+Edit the unit's `ExecStart` first if the binary isn't at
+`/home/hub75stock/hub75stock`, or if you want different flags (e.g. a
+different `--web-config-port`, or `--mock`). Runs as root (needed for
+`/dev/mem`, same as running it by hand with `sudo`) - `rpi-rgb-led-matrix`
+drops that back down to an unprivileged user right after GPIO setup, same as
+always (see *Web config form* below for why that means ports below 1024
+don't work for `--web-config-port`).
+
+`After=hub75stock-wifi-setup.service` orders it after the one-time WiFi
+provisioning above, if that's installed - harmless if it isn't (a unit
+that isn't present is simply skipped for ordering purposes), and only
+really matters on the very first boot.
 
 ## Web config form
 
@@ -506,14 +535,44 @@ active.
 
 Each `updateIntervalSeconds` tick, every configured symbol's *entire*
 current session is refetched (1-minute bars, aggregated client-side into
-`pricedata::kBucketMinutes`-wide buckets) and the old snapshot is replaced
-wholesale, rather than incrementally patching it. That's simpler than
-incremental patching, and it means a lost connection - or one transient
-fetch failure - self-heals on the very next successful poll: there's no
-accumulated local state that can drift from reality. A symbol that has
-never successfully fetched (or whose exchange isn't in the mapping table,
-see `Symbol::toYahooSymbol()`) just shows the renderer's existing dashed
-"no data yet" placeholder rather than anything crashing or hanging.
+buckets) and the old snapshot is replaced wholesale, rather than
+incrementally patching it. That's simpler than incremental patching, and it
+means a lost connection - or one transient fetch failure - self-heals on the
+very next successful poll: there's no accumulated local state that can drift
+from reality. A symbol that has never successfully fetched (or whose
+exchange isn't in the mapping table, see `Symbol::toYahooSymbol()`) just
+shows the renderer's existing dashed "no data yet" placeholder rather than
+anything crashing or hanging.
+
+Bucket width is sized dynamically per exchange - the *regular session
+length* (`sessionEnd - sessionStart`, which is stable day to day even
+though the exact start/end timestamps aren't reliable, see below), divided
+into `pricedata::kBucketCount` buckets - rather than a fixed number of
+minutes. A fixed width would mean exchanges with shorter regular sessions
+(NYSE/Nasdaq: 6.5h) fill visibly less of the chart than ones with longer
+sessions (Xetra: ~8.5h; Frankfurt floor trading: ~14h), for no reason a
+viewer would find meaningful - every session's chart should look like a
+*complete* day, whatever that exchange's actual hours are, not a shorter one
+just trailing off part-way across the panel. `MockDataProvider`'s synthetic
+session doesn't have this problem (no real exchange hours to vary) and
+keeps a fixed width, `pricedata::kBucketMinutes`.
+
+Deliberately *not* sized from how much data happens to be available at
+fetch time (i.e. the span between the first and last *returned* bar) -
+tried that first, and it looked right for a completed session but broke
+badly for one still in progress. Confirmed for real: at 09:51 CEST, 51
+minutes into Xetra's 09:00 open, the newest bar Yahoo's free/unauthenticated
+feed actually returned was timestamped 09:33 - a real ~15-20 minute
+reporting lag on top of barely any bars existing yet this early anyway. That
+made the *observed* span tiny, which when divided into 60 buckets produced
+very fine buckets that the (relatively few) available minutes then nearly
+filled on their own - a chart reading as "almost half full" after roughly a
+tenth of the session had actually elapsed, not proportional to real
+progress through the day at all. Sizing from the session's fixed, known
+length instead keeps the bucket width constant all day, so the chart fills
+up in proportion to *actual* elapsed session time and reaches exactly 100%
+at close - "left edge is open, right edge is close", not "left edge is
+open, right edge is however much data happened to exist a moment ago".
 
 Bucket aggregation deliberately keys off the *data's own first timestamp*,
 not `meta.currentTradingPeriod.regular.start` from the response - on a
@@ -525,6 +584,27 @@ buckets for every data point (hit for real testing an ASX symbol on a
 Sunday). The market-open/closed state shown via `marketClosed` *does* still
 come from that metadata (compared against the current time), which is a
 separate, correctly-scoped use of it.
+
+A thinly-traded listing can have long stretches with no trades at all
+(confirmed for real testing `IONQ`'s Xetra cross-listing - most exchanges
+list foreign stocks under their own internal code rather than the
+home-market ticker, see *Configuration* below, and this particular one
+barely trades). Each `PriceBucket` carries a `hasData` flag rather than
+being silently omitted, so a slot's position in the array - and so its
+column on screen - always matches its actual elapsed session time, never
+"whichever real data point happened to come next"; two real trades an hour
+apart don't end up looking adjacent just because nothing happened in
+between. Candlestick mode simply draws nothing for a no-data slot. Line/area
+mode draws a connecting line across the gap, dimmed rather than at full
+brightness, so the overall day's shape stays legible without a gap chopping
+it into disconnected specks - but visibly flagged as "no data here", not a
+claim that the price moved smoothly through a stretch there's no
+information about. Deliberately a dimmed version of whichever colour the
+real segments already are (green/red/white when the market's open, grey
+when closed and styled that way) rather than a separate hardwired colour -
+that reads as "less certain", needs no special-casing against the
+closed-market grey styling, and doesn't reuse a hue already spoken for by
+the [connectivity indicator](#connectivity-status-indicator).
 
 Fetches for multiple symbols run concurrently (capped at a handful at a
 time) rather than one giant burst - a deliberate, if informal, courtesy
@@ -550,7 +630,8 @@ towards an API with no documented rate limit to respect in the first place.
     src/stocks/yahoodataprovider.*  the real fetcher (default)
     src/net/connectivitymonitor.*  polls nmcli for WiFi/internet state
     src/web/configserver.*    unauthenticated web form for the config file
-    provisioning/             one-time WiFi setup: script, systemd unit, template
+    provisioning/             one-time WiFi setup (script, systemd unit,
+                              template) and the app's own systemd unit
 
 `PanelView` is the piece that makes per-panel drawing work. The library exposes
 the whole wall as one large canvas; a `PanelView` maps local (0,0) to a panel's

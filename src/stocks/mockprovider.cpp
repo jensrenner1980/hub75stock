@@ -43,7 +43,7 @@ StockSnapshot MockDataProvider::generateSession(const Symbol &symbol)
     snapshot.buckets.reserve(pricedata::kBucketCount);
 
     float price = startingPrice(symbol);
-    snapshot.sessionOpenPrice = price;
+    snapshot.referencePrice = price;
 
     for (int i = 0; i < pricedata::kBucketCount; ++i) {
         PriceBucket bucket;

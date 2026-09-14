@@ -114,10 +114,9 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
                                            .value(QStringLiteral("regular")).toObject();
     const qint64 sessionStart = regularPeriod.value(QStringLiteral("start")).toInteger();
     const qint64 sessionEnd = regularPeriod.value(QStringLiteral("end")).toInteger();
-    const qint64 bucketSeconds = qint64(pricedata::kBucketMinutes) * 60;
 
-    // Aggregate 1-minute bars into kBucketMinutes-wide buckets, keyed by
-    // elapsed time since the first returned bar - deliberately not
+    // Aggregate 1-minute bars into buckets, keyed by elapsed time since the
+    // first returned bar - deliberately not
     // meta.currentTradingPeriod.regular.start: on a request made outside
     // that period (e.g. over the weekend, or for an exchange far enough
     // from UTC that "today" server-side isn't the same calendar day as the
@@ -128,6 +127,53 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     // valid anchor for grouping nearby bars, regardless of what the
     // metadata says about "the current session".
     const qint64 firstTimestamp = timestamps.first().toInteger();
+
+    // Bucket width is sized to the exchange's actual *regular session
+    // length* (sessionEnd - sessionStart), not the fixed
+    // pricedata::kBucketMinutes MockDataProvider uses - so every exchange's
+    // chart fills the full column width by close regardless of how long its
+    // day runs (a 6.5h NYSE session and an 8.5h Xetra session should both
+    // look like a complete day's chart, not one visibly shorter/emptier
+    // just because the exchange trades for fewer hours).
+    //
+    // Deliberately *not* sized from how much data happens to be available
+    // at fetch time (i.e. not "timestamps.last() - timestamps.first()"),
+    // which was the bug in an earlier version of this: early in a session,
+    // only a few minutes of bars exist yet (plus Yahoo's free/unauthenticated
+    // feed runs a real ~15-20 minute reporting lag on top of that - confirmed
+    // for real: at 09:51 CEST, 51 minutes into Xetra's 09:00 open, the
+    // newest bar returned was timestamped 09:33), so that span is naturally
+    // tiny early on. Dividing a tiny span by kBucketCount produced very fine
+    // buckets that the (relatively few) available minutes then nearly
+    // filled up on their own - a chart reading as "almost half full" after
+    // barely a tenth of the session had actually elapsed, not proportional
+    // to real progress through the day at all. Using the session's fixed,
+    // known duration instead keeps the bucket width constant all day, so
+    // the chart fills up in proportion to actual elapsed session time and
+    // reaches exactly 100% at close - "left edge is open, right edge is
+    // close" (see README "Live data"), not "left edge is open, right edge
+    // is however much data Yahoo happened to have a moment ago".
+    //
+    // The session metadata's exact start/end *timestamps* aren't reliable
+    // for anchoring (see above - it can describe a different session
+    // entirely), but the session's *duration* is: a given exchange's
+    // regular trading hours are essentially constant day to day (bar the
+    // rare early-close holiday), so reusing it purely as a length is safe
+    // even when the metadata is otherwise describing the wrong day.
+    // Falls back to the fixed default if the metadata is missing/malformed,
+    // and is never allowed to be shorter than what's already been observed
+    // today - the actual data seen so far is a hard lower bound on how long
+    // the session has to be, regardless of what the metadata claims.
+    qint64 sessionDurationSeconds = sessionEnd > sessionStart ? (sessionEnd - sessionStart) : 0;
+    if (sessionDurationSeconds <= 0)
+        sessionDurationSeconds = qint64(pricedata::kBucketMinutes) * 60 * pricedata::kBucketCount;
+    const qint64 lastTimestamp = timestamps.last().toInteger();
+    const qint64 observedSpanSeconds = std::max<qint64>(0, lastTimestamp - firstTimestamp);
+    sessionDurationSeconds = std::max(sessionDurationSeconds, observedSpanSeconds);
+
+    const qint64 bucketSeconds =
+        std::max<qint64>(60, (sessionDurationSeconds + pricedata::kBucketCount - 1)
+                                  / pricedata::kBucketCount);
 
     // Aggregated real data only, keyed by bucketIndex - a QMap rather than
     // appending sequentially to a plain array, specifically so two real
@@ -176,12 +222,22 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     if (aggregated.isEmpty())
         return; // nothing usable in this response - keep the old snapshot
 
-    // The true session open/last-traded price, from the real data only -
-    // unaffected by the gap-filling or the truncation below, so a sparse or
-    // long session still gets a correct "daily change"/up-down colour
-    // rather than one computed relative to a placeholder or to wherever the
-    // visible window happens to start.
-    const float sessionOpenPrice = aggregated.first().open;
+    // "Daily change" is measured against the *previous trading day's
+    // close* - the same convention every ticker/chart site uses - not
+    // today's own opening print. Confirmed for real the two can disagree
+    // substantially: NVD.DE gapped down ~2.4% overnight (previousClose
+    // 189.50 -> today's own first bar 185.00) and then traded almost flat
+    // for the rest of the session so far, so measuring "vs today's own
+    // open" showed a barely-there ~-0.2% while Yahoo's own site correctly
+    // showed -2.6% (vs previousClose) - completely missing the overnight
+    // gap, not just a rounding difference. Falls back to today's own first
+    // real open only if previousClose/chartPreviousClose are both missing
+    // from the response (better than a zero/undefined reference).
+    const double previousCloseValue = meta.value(QStringLiteral("previousClose")).toDouble(
+        meta.value(QStringLiteral("chartPreviousClose")).toDouble(0.0));
+    const float referencePrice = previousCloseValue > 0.0
+                                     ? static_cast<float>(previousCloseValue)
+                                     : aggregated.first().open;
     const float lastPrice = aggregated.last().close;
 
     // Expand into a dense, chronologically-indexed array spanning every
@@ -205,13 +261,13 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
 
     // Keep only the most recent kBucketCount slots, matching the fixed
     // history width the renderer/mock provider both assume - this only
-    // affects what's drawn, not sessionOpenPrice/lastPrice above.
+    // affects what's drawn, not referencePrice/lastPrice above.
     if (buckets.size() > pricedata::kBucketCount)
         buckets = buckets.mid(buckets.size() - pricedata::kBucketCount);
 
     StockSnapshot snapshot;
     snapshot.symbol = symbol;
-    snapshot.sessionOpenPrice = sessionOpenPrice;
+    snapshot.referencePrice = referencePrice;
     snapshot.lastPrice = lastPrice;
     snapshot.buckets = buckets;
 

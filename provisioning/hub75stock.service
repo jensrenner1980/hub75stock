@@ -1,0 +1,13 @@
+[Unit]
+Description=hub75stock - HUB75 LED matrix stock ticker
+After=network-online.target hub75stock-wifi-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/hub75stock/hub75stock --config /boot/firmware/hub75stock.json --web-config-port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

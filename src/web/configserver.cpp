@@ -12,6 +12,8 @@
 #include <QUrlQuery>
 #include <QVector>
 
+#include <unistd.h>
+
 namespace hub75 {
 namespace {
 
@@ -286,6 +288,18 @@ QHttpServerResponse ConfigWebServer::handleSave(const QHttpServerRequest &reques
         return QHttpServerResponse("text/html; charset=utf-8", renderForm(&message).toUtf8().constData(),
                                    QHttpServerResponder::StatusCode::InternalServerError);
     }
+
+    // QSaveFile::commit() protects against a *partial* write (it writes to a
+    // temp file and renames over the target, so a crash mid-write never
+    // corrupts the existing file) but doesn't force the result to physical
+    // storage - the write, and the rename itself, can still be sitting in
+    // the page cache. On a device that might lose power without a clean
+    // shutdown rather than being cleanly rebooted, that's a real way to
+    // lose a change that was already reported back as "Saved". sync()
+    // flushes all pending filesystem writes system-wide; blunt (it's not
+    // scoped to just this one file) but simple and correct, and this device
+    // writes to disk rarely enough that the cost is a non-issue.
+    ::sync();
 
     const QString message = QStringLiteral(
         "<div class=\"ok\">Saved. Restart hub75stock for these changes to take effect.</div>");
