@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_CONFIGSERVER_H
 #define HUB75_CONFIGSERVER_H
 
@@ -5,10 +7,14 @@
 #include <QObject>
 #include <QString>
 #include <QTcpServer>
+#include <QVector>
 
 #include <memory>
 
 namespace hub75 {
+
+class FontStore;
+class PanelView;
 
 // A tiny, unauthenticated web form for editing the day-to-day settings in
 // the JSON config file - deliberately not the matrix/GPIO/hardware-wiring
@@ -20,10 +26,16 @@ namespace hub75 {
 // changes take effect on the next restart of the main application, not
 // live - this reads and writes the config file directly and has no
 // connection to a possibly-running hub75stock process.
+//
+// The one exception: exporting the *currently displayed* view as a PNG (see
+// panelexport.h) necessarily does need live access to the running panels,
+// so the constructor takes references to them - everything else here still
+// only ever touches the config file.
 class ConfigWebServer
 {
 public:
-    explicit ConfigWebServer(QString configPath);
+    ConfigWebServer(QString configPath, QVector<PanelView *> panels, FontStore *fonts,
+                    QString exportDir);
 
     // Starts listening on the given port (all interfaces). Returns false and
     // fills *error if the port can't be bound.
@@ -32,8 +44,12 @@ public:
 private:
     QString renderForm(const QString *statusMessage) const;
     QHttpServerResponse handleSave(const QHttpServerRequest &request);
+    QHttpServerResponse handleExport(const QHttpServerRequest &request);
 
     QString configPath_;
+    QVector<PanelView *> panels_;
+    FontStore *fonts_ = nullptr;
+    QString exportDir_;
     QHttpServer server_;
     std::unique_ptr<QTcpServer> tcpServer_;
 };

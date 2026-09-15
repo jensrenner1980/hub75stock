@@ -59,6 +59,24 @@ while [ "$i" -lt 15 ]; do
     sleep 1
 done
 
+# The radio reporting "enabled" doesn't mean NetworkManager has actually
+# scanned and cached this specific AP yet - confirmed for real: "nmcli
+# device wifi connect" failed with "No network with SSID '...' found" this
+# early in boot, for an AP that appeared immediately once the same command
+# was run by hand moments later (nmcli device wifi connect does not itself
+# trigger a scan). Actively rescan and wait for the target SSID to actually
+# show up in the AP list before attempting to connect to it, rather than
+# racing a scan NetworkManager may not have gotten to yet.
+i=0
+while [ "$i" -lt 15 ]; do
+    nmcli device wifi rescan 2>/dev/null || true
+    sleep 2
+    if nmcli -t -f SSID device wifi list 2>/dev/null | grep -Fxq "$SSID"; then
+        break
+    fi
+    i=$((i + 1))
+done
+
 if nmcli device wifi connect "$SSID" password "$PASSPHRASE"; then
     python3 -c 'import json, sys
 path = sys.argv[1]

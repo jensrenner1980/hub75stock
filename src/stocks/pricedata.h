@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_PRICEDATA_H
 #define HUB75_PRICEDATA_H
 
@@ -58,6 +60,18 @@ struct StockSnapshot {
     float referencePrice = 0.0f;
     float lastPrice = 0.0f;
     bool marketOpen = true;
+    // Epoch seconds of the displayed session's own first bar (for
+    // YahooDataProvider, its bucket-anchoring "firstTimestamp" - see its own
+    // comments on why that, not the response metadata's own session start,
+    // is the reliable anchor). Lets the renderer tell "after hours, still
+    // today's session" apart from "market's closed and this is a stale,
+    // previous day's frozen session" (e.g. Friday's close still showing
+    // Monday morning before the next open) - two states that otherwise both
+    // just look like "!marketOpen" and would draw identically. 0 for
+    // MockDataProvider's synthetic sessions, which are always "today" by
+    // construction - see StockSnapshot::isValid() callers for how 0 is
+    // treated (never stale).
+    qint64 sessionAnchorEpoch = 0;
     QVector<PriceBucket> buckets; // 0..pricedata::kBucketCount, oldest first
 
     float dailyChange() const { return lastPrice - referencePrice; }

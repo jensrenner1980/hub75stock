@@ -8,6 +8,118 @@ Up to 3 electrical chains with up to 5 panels each (64x32 pixels per panel),
 so up to 15 panels. Every panel is drawn independently: nothing is ever
 rendered across a panel boundary.
 
+## Hardware wiring
+
+Current setup: one Waveshare 64x32 panel, direct-wired to the Pi's 40-pin
+GPIO header - no HAT/adapter board yet (see *Adafruit HAT/Bonnet* below for
+the planned upgrade). `matrix.hardwareMapping: "regular"` in the config
+(the library's own default) is the correct value for this wiring - it turned
+out to be an exact pin-for-pin match for Waveshare's own recommended
+pinout for this panel, needing no adjustment.
+
+### Power
+
+The panel needs its own 5V supply, separate from the Pi's - **do not** power
+a HUB75 panel from the Pi's own 5V rail or a USB port; these panels draw far
+more current than that can supply. Double-check polarity before connecting:
+what's printed on the panel's power connector is correct, but some
+third-party supply cables have been reported with red/black reversed.
+
+Sizing the supply: the library's own guidance is to budget for **~3.5A per
+32x32 quadrant at full white** (`wiring.md` in the vendored library) as a
+safe, conservative figure across panel brands - for a 64x32 panel like this
+one, that's ~7A worst case. This project's own panel measured well under
+that in practice: full-white draw settles around **700mA-1A** at 5V on a
+lab bench PSU (30V/3A max, set to 5V, current limit at 3A - never hit),
+confirmed for real via oscilloscope (probing OE and a data line, triggered
+on LAT) that the configured brightness genuinely reaches the physical GPIO
+signals rather than just trusting the software setting. That lower number
+is this specific panel's own characteristic, not something to design a
+supply around for a *different* panel - size for the conservative figure,
+not this one's measured draw, especially once more panels are added to the
+chain.
+
+The Pi and the panel's logic share a common ground through the HUB75
+ribbon's own GND pins (wired as part of the table below) - no separate
+ground wire needed beyond what that connector already carries, as long as
+every GND pin the table calls for is actually connected and not skipped as
+"redundant".
+
+### Data/control pins
+
+The Raspberry Pi only drives 3.3V logic; many HUB75 panels are speced for
+5V logic on their inputs. In practice, most panels read 3.3V as a valid
+high just fine over a short cable, which is what this project's own single,
+directly-wired panel does today. If you see glitches, erratic pixels, or
+plan to run a longer cable or drive more panels, consider adding line
+buffering/level-shifting - the vendored library ships open-hardware adapter
+board designs for exactly this under
+[`rpi-rgb-led-matrix/adapter/`](rpi-rgb-led-matrix/adapter/), which sit
+between the Pi and the panel(s) and buffer/shift every signal properly
+rather than relying on the panel's own tolerance for an out-of-spec input
+level.
+
+Essential connections for **one panel on one chain** (a subset of the full
+`"regular"` mapping - see the vendored library's own
+[`wiring.md`](rpi-rgb-led-matrix/wiring.md) for the complete 3-chain table if
+wiring more than one chain directly rather than via a HAT):
+
+| Pi pin | Signal      | GPIO (BCM) |
+|-------:|-------------|:----------:|
+| 6      | GND         | -          |
+| 7      | Strobe/LAT  | GPIO4      |
+| 11     | Clock       | GPIO17     |
+| 12     | OE-         | GPIO18     |
+| 13     | Chain 1 / G1 | GPIO27    |
+| 15     | A           | GPIO22     |
+| 16     | B           | GPIO23     |
+| 18     | C           | GPIO24     |
+| 19     | Chain 1 / B2 | GPIO10    |
+| 21     | Chain 1 / G2 | GPIO9     |
+| 22     | D           | GPIO25     |
+| 23     | Chain 1 / R1 | GPIO11    |
+| 24     | Chain 1 / R2 | GPIO8     |
+| 26     | Chain 1 / B1 | GPIO7     |
+
+`D` (pin 22) is needed for this panel's 1:16 multiplexing (32-row panels);
+`E` (pin 10) is only needed for 64-row/1:32 panels and isn't wired here.
+Any of the header's other GND pins work equally well as pin 6 - the table
+above uses the one the upstream wiring diagram happens to reference.
+
+`ledRgbSequence` may need adjusting from the default `"RGB"` depending on
+the specific panel - this project's own Waveshare panel (FM6124DJ driver
+ICs) needed `"RBG"`, discovered via the `color-cycle` test pattern showing
+red correctly but green/blue swapped (see *Configuration* below). Worth
+running `color-cycle` on any newly-wired panel before trusting its colours.
+
+After wiring, verify with the hardware bring-up patterns before trusting
+real stock data on it - `identify` (numbering/orientation), `panel-order`
+(daisy-chain sequence), `border` (edges/alignment), and `color-cycle` (the
+RGB mapping above) catch the most common wiring mistakes fastest; see
+*Running* below for the full pattern list and how to invoke them.
+
+### Adafruit HAT/Bonnet (planned)
+
+An Adafruit "Triple LED Matrix Bonnet for Raspberry Pi, HUB75" (PID/MPN
+6358, supports up to 3 parallel chains) is on order to replace the direct
+wiring above once it arrives. Per Adafruit's own published schematic for
+this board: its buffer chip wires
+GPIO18->OE, GPIO17->CLK, GPIO4->Strobe, GPIO22->A, GPIO23->B, GPIO24->C -
+an exact match for the `"regular"` mapping already in use, not the
+`adafruit-hat`/`adafruit-hat-pwm` mapping the older, single-chain classic
+Adafruit RGB Matrix HAT/Bonnet needs (which only supports one chain at all,
+per the library's own mapping table - a three-chain board couldn't use it
+regardless). OE already sitting on GPIO18 (a hardware-PWM-capable pin) from
+the factory also suggests the classic GPIO4<->18 solder-bridge mod - which
+exists specifically because *that* older HAT defaults OE onto GPIO4 instead
+- won't be needed here either.
+
+If that read holds up once the board is physically in hand: plug it in,
+leave `hardwareMapping: "regular"` unchanged, no solder mod required. Worth
+confirming with a continuity check against the table above before fully
+trusting it, though, since this is inferred from a schematic image rather
+than verified on real hardware.
+
 ## Status
 
 Build system, configuration, panel addressing, hardware test patterns, stock
@@ -68,12 +180,15 @@ One-time setup (needs root; run in a real terminal, not `sudo -S`/piped input
 
     sudo dpkg --add-architecture arm64
     sudo apt update
-    sudo apt install crossbuild-essential-arm64 qt6-base-dev:arm64
+    sudo apt install crossbuild-essential-arm64 qt6-base-dev:arm64 zlib1g-dev:arm64
 
 This pulls in `gcc-aarch64-linux-gnu`/`g++-aarch64-linux-gnu`/
 `binutils-aarch64-linux-gnu`/`libc6-dev-arm64-cross`/
-`libstdc++-14-dev-arm64-cross` for the compiler, and the arm64 build of Qt6
-for the target headers/libs - all from Debian's own repos, nothing external.
+`libstdc++-14-dev-arm64-cross` for the compiler, the arm64 build of Qt6 for
+the target headers/libs, and `zlib1g-dev:arm64` for `pngwriter.cpp`'s
+`libz.so`/`zlib.h` (the runtime `.so.1` is normally already on the Pi, but
+cross-*linking* needs the unversioned dev symlink, which only the `-dev`
+package installs) - all from Debian's own repos, nothing external.
 Check what Qt version your Pi actually has installed
 (`dpkg -l | grep libqt6core6t64` over SSH) - if it doesn't match what
 `apt-cache policy qt6-base-dev:arm64` offers on the host, there's a real risk
@@ -148,6 +263,9 @@ Useful flags:
 * `--font <5x8|4x6|tom-thumb>` - the embedded font to use.
 * `--mock` - synthetic data instead of fetching real prices from Yahoo
   Finance (see *Live data*). Ignored with `--pattern`.
+* `--export-dir <path>` - where the web form's "Export current view as
+  PNG" button saves to (see *Export current view as PNG*). Default
+  `/tmp/hub75stock-exports`.
 * any `--led-*` flag of rpi-rgb-led-matrix overrides the JSON file; use this
   for the panel quirks that have no JSON key yet, e.g.
   `--led-panel-type=FM6126A`, `--led-multiplexing=1`, `--led-row-addr-type=1`.
@@ -190,7 +308,7 @@ directory), then next to the binary itself, then `/etc/hub75stock/hub75stock.jso
     "gpioSlowdown": 1
   },
   "global": {
-    "updateIntervalSeconds": 60,
+    "updateIntervalSeconds": 180,
     "rotationSeconds": 15,
     "marketClosed": "grey"
   },
@@ -438,6 +556,56 @@ At deploy time, the Pi itself needs the matching **runtime** libraries:
 sudo apt install libqt6httpserver6 libqt6websockets6
 ```
 
+### Export current view as PNG
+
+A button on the web form saves a PNG snapshot of *every configured panel's
+currently displayed view* - whatever's actually on screen at that exact
+moment, chart or list mode, real hardware or `--dry-run` - to
+`--export-dir` (default `/tmp/hub75stock-exports`; created if it doesn't
+exist).
+
+One 20x20px block per real LED: a 2px black border framing a 16x16 fill,
+either that LED's actual lit colour or `#0f0f0f` for one that's genuinely
+unlit (pure black) - so a 64x32 panel becomes a 1280x640 image. A blue
+"hub75stock" watermark (36px tall, the embedded 4x6 font scaled up 6x -
+chosen specifically so 6 * 6px native height lands on exactly 36, not an
+approximation) sits in the bottom-**left** corner - deliberately not
+bottom-right, which is where the connectivity indicator (see below) always
+lives on row 1/column 1's panel; the two would otherwise compete for the
+same spot on that panel's export.
+
+Filenames are `R<row>C<column>_<yyyyMMdd_HHmmss>.png` - not the symbol(s)
+currently shown, since list mode can show up to four simultaneously and
+chart modes rotate through their own over time, so panel position is the
+only label that's ever unambiguous.
+
+This needed one real piece of plumbing: nothing in the rendering pipeline
+could previously be *read back* once drawn - `PanelView` only exposed
+`SetPixel` (write), and on real hardware the canvas is a write-only,
+one-way GPIO output by design. `PanelView` now mirrors every
+`SetPixel`/`Fill` call into a small in-memory shadow buffer
+(`shadowPixel()`), cleared in step with `MatrixWall::clear()` each frame -
+`panelexport.cpp` reads that back rather than needing hardware support that
+doesn't exist.
+
+The watermark is rendered with the project's own embedded BDF font (via the
+library's own `DrawText()`, onto a throwaway `MemoryCanvas`, then blitted
+into the PNG scaled up) rather than Qt's `QPainter`/`QFont` text APIs -
+confirmed directly that those crash without a `QGuiApplication` (even with
+`QT_QPA_PLATFORM=offscreen` set), and this project only ever constructs a
+`QCoreApplication`.
+
+More generally, `panelexport.cpp` touches no Qt6::Gui at all - the pixel
+buffer is a plain `QByteArray`, saved via `pngwriter.cpp`'s own minimal PNG
+encoder (an `IHDR`/`IDAT`/`IEND` writer over zlib's `compress2()`/`crc32()`)
+rather than `QImage::save()`. That's deliberate, not a style preference:
+`libqt6gui6`'s own *hard* dependencies (not just Recommends) pull in the
+entire X11/EGL/OpenGL/input library stack - confirmed for real to be more
+than a Raspberry Pi's SD card can spare. `pngwriter.cpp` needs only zlib,
+already a near-universal, tiny dependency (see "Cross-compiling" above for
+the one extra package this adds to that setup: `zlib1g-dev:arm64`, on the
+build host only - nothing extra to install on the Pi itself).
+
 ### Startup QR splash
 
 The first panel (row 1, column 1) shows a scannable QR code for
@@ -533,6 +701,17 @@ Yahoo being reachable.
 `main.cpp` and `stockrenderer.cpp` don't need to know or care which is
 active.
 
+`updateIntervalSeconds` is clamped to 60..900 (default 180) - deliberately
+never faster than once a minute: Yahoo's own bars are 1-minute granularity
+and the free feed already lags ~15-20 min behind real time, so polling
+faster than that buys no freshness and only adds load. The default moved
+from a flat 60s to 180s after a real, extended fetch stall was observed on
+live hardware after several hours of once-a-minute polling for multiple
+symbols - not confirmed as rate-limiting specifically, but conservative
+polling is cheap insurance against it either way (see the `qWarning()`
+fetch-failure logging and the connectivity indicator's red "data issue"
+state in `YahooDataProvider`, both added for visibility into exactly this).
+
 Each `updateIntervalSeconds` tick, every configured symbol's *entire*
 current session is refetched (1-minute bars, aggregated client-side into
 buckets) and the old snapshot is replaced wholesale, rather than
@@ -585,6 +764,37 @@ Sunday). The market-open/closed state shown via `marketClosed` *does* still
 come from that metadata (compared against the current time), which is a
 separate, correctly-scoped use of it.
 
+`marketClosed: "grey"` only actually shows grey once the *displayed session
+itself* is stale - a previous day's frozen close (e.g. Friday's chart still
+showing Monday morning before the next open), not simply "market's closed
+for today." This needed its own signal (`StockSnapshot::sessionAnchorEpoch`,
+the displayed session's own first bar) precisely because the response
+metadata can't tell "after hours, same day" and "before today's open, still
+showing yesterday" apart on its own: before today's own session has
+started, `currentTradingPeriod.regular` already describes *today's
+upcoming* session even while the bars actually returned are still
+yesterday's, so both situations look identical as "now is before that
+metadata's session start." Comparing the session's own anchor timestamp
+against the viewer's local calendar date does distinguish them.
+
+After today's own close but still the same calendar day ("after hours"),
+only the **last-price figure** dims - the ticker, the day's % change, and
+the chart itself all stay at full, undimmed colour. That's deliberate, not
+an oversight: the last price is the one number that's genuinely only true
+while the market's open (it stops moving the instant the session ends,
+won't move again until the next one starts), while the day's % change is
+still exactly correct once the session is over and the chart is a complete,
+accurate record of the whole day regardless of when you're looking at it -
+neither one is made any less true by the market being closed, so neither
+dims for that reason. The result: the display stays at whatever brightness
+was configured for trading hours almost all the time, with one small,
+specific cue (`applyPriceMarketState()` vs. `applyMarketState()` for
+everything else, in `stockrenderer.cpp`) rather than a broad visual shift
+twice a day. `marketClosed: "normal"`/`"blank"` are unaffected by any of
+this - `"normal"` never overrides colour regardless of staleness, `"blank"`
+blanks the panel the whole time the market isn't open regardless of
+staleness.
+
 A thinly-traded listing can have long stretches with no trades at all
 (confirmed for real testing `IONQ`'s Xetra cross-listing - most exchanges
 list foreign stocks under their own internal code rather than the
@@ -600,11 +810,28 @@ brightness, so the overall day's shape stays legible without a gap chopping
 it into disconnected specks - but visibly flagged as "no data here", not a
 claim that the price moved smoothly through a stretch there's no
 information about. Deliberately a dimmed version of whichever colour the
-real segments already are (green/red/white when the market's open, grey
-when closed and styled that way) rather than a separate hardwired colour -
+real segments already are (green/red/white live or after-hours, grey only
+for a stale session styled that way) rather than a separate hardwired colour -
 that reads as "less certain", needs no special-casing against the
 closed-market grey styling, and doesn't reuse a hue already spoken for by
 the [connectivity indicator](#connectivity-status-indicator).
+
+Line/area mode colours **per point, relative to the session's reference
+price** - green above it, red below - rather than one verdict for the whole
+chart based only on where the session currently stands. That's the same
+convention real intraday stock apps use (Yahoo Finance, Robinhood, Google
+Finance): it's strictly more informative than a single colour, since a
+stock that dipped below its reference mid-session and recovered actually
+shows the dip instead of rendering as one solid colour for the entire
+chart. Area mode's fill stops at the reference line rather than running all
+the way to the chart's bottom edge - a below-reference point fills red only
+between the reference line and that point, not the panel's full height -
+matching the same real-world convention rather than one solid colour block
+regardless of which side of the reference the price sits on. Candlestick
+mode is deliberately **not** part of this: each candle keeps colouring
+itself by its own open vs. close within that time slice (the standard,
+different candlestick convention), not by position relative to the session
+reference.
 
 Fetches for multiple symbols run concurrently (capped at a handful at a
 time) rather than one giant burst - a deliberate, if informal, courtesy
@@ -617,7 +844,10 @@ towards an API with no documented rate limit to respect in the first place.
     src/config/appconfig.*    JSON config: parsing, validation, defaults
     src/config/symbol.*       EXCHANGE:TICKER[:ALIAS] parsing and provider mapping
     src/display/matrixwall.*  owns the hardware, hands out one view per panel
-    src/display/panelview.*   a Canvas over one panel's 64x32 sub-rectangle
+    src/display/panelview.*   a Canvas over one panel's 64x32 sub-rectangle,
+                              with a readback shadow buffer for panelexport.*
+    src/display/panelexport.* "export current view as PNG" web form button
+    src/display/pngwriter.*   minimal PNG encoder (zlib only, no Qt6::Gui)
     src/display/memorycanvas.*  offscreen RGB buffer + ANSI preview (--dry-run)
     src/display/fontstore.*   embedded BDF fonts
     src/display/textutil.*    shared glyph-measurement/alignment helpers
@@ -647,3 +877,158 @@ standalone 64x32 display.
    on the development host so far, not yet on-Pi for an extended run - worth
    watching for how it behaves over hours/days (rate limiting, symbols that
    go stale, etc.) once deployed.
+
+## Preparing a fresh Raspberry Pi OS Lite image
+
+An end-to-end walkthrough for turning a stock Raspberry Pi OS Lite (64-bit,
+Debian 13/trixie) install into a working `hub75stock` deployment. Assumes
+the cross-compiled binary already exists (see *Cross-compiling* above) and
+the hardware is wired per *Hardware wiring* above.
+
+### 1. Flash and get a shell
+
+Raspberry Pi Imager, 64-bit "Raspberry Pi OS Lite" - the Imager's own
+advanced options (hostname, SSH enabled, locale) can be set at flash time
+for a one-off deployment. For the "flash once, provision many devices from
+the same generic image" workflow this project is actually built around,
+skip that and use the boot-partition mechanisms instead: `wificonfig.json`
+for network credentials (see *WiFi provisioning* above) and
+`hub75stock.json` on the boot partition for the app's own config (see
+*Configuration* above) - both droppable onto an already-flashed card from
+any OS via a card reader, no SSH needed before first boot at all. Either
+way, first access is over SSH once the Pi has an IP (`ssh
+<user>@<hostname>.local` if mDNS resolves, otherwise find the IP via the
+router or - once the app itself is running with `--web-config-port` - the
+[startup QR splash](#startup-qr-splash) on the panel itself).
+
+### 2. Update and trim the base install
+
+    sudo apt update && sudo apt full-upgrade
+
+Per the vendored library's own troubleshooting guidance
+(`rpi-rgb-led-matrix/README.md`), a minimal image is a more reliable one for
+driving these panels - fewer background processes competing for timing-
+sensitive CPU time. Raspberry Pi OS Lite already starts fairly minimal;
+removing what's still not needed for a headless display device is optional
+but recommended:
+
+    sudo apt-get remove bluez bluez-firmware pi-bluetooth triggerhappy pigpio
+
+### 3. Disable onboard audio
+
+The library's hardware-pulse timing shares a subsystem with onboard sound -
+confirmed necessary for this project, not just a hypothetical: the library
+actively refuses to start (`--led-no-hardware-pulse` aside) if it detects
+the `snd_bcm2835` module loaded. Both steps below are needed; some
+distributions load the module even with audio nominally off at the
+`dtparam` level:
+
+    echo "dtparam=audio=off" | sudo tee -a /boot/firmware/config.txt
+    echo "blacklist snd_bcm2835" | sudo tee /etc/modprobe.d/blacklist-rgb-matrix.conf
+    sudo update-initramfs -u
+
+Reboot and confirm with `lsmod | grep snd_bcm2835` (no output expected)
+before wiring up the panel.
+
+### 4. Install runtime dependencies
+
+    sudo apt install libqt6httpserver6 libqt6websockets6 libqrencode4
+
+`libqt6core6t64`/`libqt6network6t64` come in transitively as dependencies of
+the packages above - no need to list them separately. Deliberately **not**
+`libqt6gui6`: its own hard dependencies pull in the entire X11/EGL/OpenGL/
+input library stack, confirmed for real to be more than a Raspberry Pi
+Zero 2 W's SD card can spare, and nothing in this project actually needs it
+(see *Export current view as PNG* above for why). `zlib1g` (used by
+`pngwriter.cpp`) and NetworkManager (`nmcli` - used by WiFi
+provisioning and the [connectivity indicator](#connectivity-status-indicator))
+both ship as part of a stock Raspberry Pi OS Lite image already; nothing
+extra to install for either.
+
+### 5. Optional: reserve a CPU core for display refresh
+
+The app itself suggests this at startup if it's missing (see
+`rpi-rgb-led-matrix/lib/gpio.cc`) on any multi-core Pi. Add to the end of
+the existing line in `/boot/firmware/cmdline.txt` (same line, no newline):
+
+    isolcpus=3
+
+Reserves the last core purely for the panel refresh thread - worth it if
+anything else meaningful runs on the same Pi, per the vendored library's
+own CPU-use notes.
+
+### 6. Boot-partition write access for the unprivileged runtime user
+
+Needed specifically because `provisioning/hub75stock.service` points
+`--config` at `/boot/firmware/hub75stock.json` (the boot partition, chosen
+so the config is droppable from any OS - see *Configuration* above): the
+app starts as root (needed for `/dev/mem`), but `rpi-rgb-led-matrix` drops
+privileges to the unprivileged `daemon` user immediately after GPIO setup,
+*before* the web config form ever handles a save request (see *Hardware
+wiring*/*Web config form* above). Saving a change through the form then
+means writing to `/boot/firmware/hub75stock.json` as `daemon`, not root.
+
+FAT32 - unlike NetworkManager's own storage, or any real Linux filesystem -
+has no actual per-file Unix permissions of its own; what `ls -l` shows for
+files on it is entirely synthesised by the kernel's FAT driver from the
+mount's own `uid=`/`gid=`/`umask=` options, uniformly for every file on the
+partition. By default those usually resolve to root-only-writable, which is
+exactly why an unprivileged save can otherwise fail silently or with a
+permission error. Confirm `daemon`'s actual UID/GID first (standard Debian
+value is `1`/`1`, but don't assume - check):
+
+    id daemon
+    blkid | grep /boot/firmware    # for the PARTUUID already in /etc/fstab
+
+Then edit the existing `/boot/firmware` line in `/etc/fstab` to add the
+matching `uid=`/`gid=`, e.g.:
+
+    PARTUUID=xxxxxxxx-01  /boot/firmware  vfat  defaults,uid=1,gid=1,umask=022  0  2
+
+`umask=022` keeps it group/other-readable but only owner (`daemon`)
+-writable - tighter than leaving it wide open, since anything else on the
+system can still read `hub75stock.json` (no secrets in it) but not silently
+rewrite it. `mount -o remount /boot/firmware` (or reboot) to apply without
+needing to unmount by hand.
+
+### 7. Deploy the binary and config, install the services
+
+    scp build-hub75stock-pi/hub75stock config/hub75stock.json <user>@<pi>:/home/hub75stock/
+
+(`provisioning/hub75stock.service`'s shipped `ExecStart` assumes this exact
+path - edit it first if deploying somewhere else, see *Running at boot*
+above.) Then, on the Pi:
+
+    sudo cp provisioning/hub75stock-wifi-setup.sh /usr/local/bin/
+    sudo cp provisioning/hub75stock-wifi-setup.service /etc/systemd/system/
+    sudo cp provisioning/hub75stock.service /etc/systemd/system/
+    sudo systemctl enable hub75stock-wifi-setup.service
+    sudo systemctl enable --now hub75stock.service
+
+(Skip the `wifi-setup` unit entirely if WiFi was already configured another
+way, e.g. via the Imager's own advanced options at flash time - see *WiFi
+provisioning* above for what it's for.)
+
+### 8. Verify
+
+    sudo systemctl status hub75stock
+    journalctl -u hub75stock -n 50 --no-pager
+
+The panel should show the [startup QR splash](#startup-qr-splash) briefly
+(if `--web-config-port` is set and `wlan0` already had an IP at that exact
+moment), then real stock content. Any fetch problems from here on show up
+both in the journal (`YahooDataProvider`'s own `qWarning()` diagnostics) and
+as the [connectivity indicator](#connectivity-status-indicator) turning
+red.
+
+## License
+
+GPLv2-only (see [`LICENSE`](LICENSE)) - not a stylistic choice: `rpi-rgb-led-matrix`'s
+sources are compiled directly into the `hub75stock` binary (see
+*Cross-compiling* above), not linked as a separate shared library, and every
+one of its source files is licensed under GPL "version 2" with no "or any
+later version" clause (`GPL-2.0-only`, incompatible with GPLv3 for combining
+code). That makes the combined binary a single work under GPLv2's terms,
+so this project's own code is licensed the same way. Every source file
+under `src/` (not the vendored `rpi-rgb-led-matrix/`, which keeps its own
+original headers) carries an `SPDX-License-Identifier: GPL-2.0-only` line.

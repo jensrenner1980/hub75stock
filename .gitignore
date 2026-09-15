@@ -15,6 +15,11 @@ PXL_*.jpg
 DS[0-9][0-9][0-9][0-9].BMP
 DS[0-9][0-9][0-9][0-9].png
 Bildschirmfoto_*.png
+Screenshot_*.png
+
+# Third-party reference material (e.g. vendor schematics) with unclear
+# redistribution terms - kept locally, not pushed
+led_matrices_schem.png
 
 # Editor/OS cruft
 *~

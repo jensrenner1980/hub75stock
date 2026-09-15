@@ -13,7 +13,7 @@
   },
 
   "global": {
-    "updateIntervalSeconds": 60,
+    "updateIntervalSeconds": 180,
     "rotationSeconds": 15,
     "renderFps": 20,
     "marketClosed": "grey",

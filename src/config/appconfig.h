@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_APPCONFIG_H
 #define HUB75_APPCONFIG_H
 
@@ -74,7 +76,15 @@ struct MatrixConfig {
 
 // Settings that apply to every panel.
 struct GlobalConfig {
-    int updateIntervalSeconds = 60; // data refresh, 1..60
+    // Data refresh, 60..900. Deliberately not allowed below 60s - Yahoo's
+    // own bars are 1-minute granularity and the free feed already lags
+    // ~15-20 min behind real time, so polling faster than that buys nothing
+    // and only adds load; a real, if unconfirmed, suspicion (see
+    // YahooDataProvider) is that sustained fast polling over many hours is
+    // what triggered a real fetch stall on live hardware. 180 is a
+    // deliberately more conservative default than the polling-every-minute
+    // this used to do.
+    int updateIntervalSeconds = 180;
     int rotationSeconds = 15;       // dwell time per stock, for any single-stock
                                     // (Line/Area/Candles) display mode
     int renderFps = 20;             // canvas redraw rate

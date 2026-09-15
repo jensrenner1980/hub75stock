@@ -19,6 +19,12 @@ qt_standard_project_setup()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(QRencode REQUIRED IMPORTED_TARGET libqrencode)
 
+# For pngwriter.cpp's own minimal PNG encoder (see its own comments for why
+# this project writes PNGs itself rather than linking Qt6::Gui just for
+# QImage::save() - Qt6::Gui's hard dependencies were confirmed too much for
+# a Raspberry Pi's SD card). zlib is tiny and near-universal by comparison.
+find_package(ZLIB REQUIRED)
+
 # ---------------------------------------------------------------------------
 # Vendored rpi-rgb-led-matrix.
 #
@@ -87,6 +93,10 @@ qt_add_executable(hub75stock
     src/net/connectivitymonitor.h
     src/display/qrsplash.cpp
     src/display/qrsplash.h
+    src/display/panelexport.cpp
+    src/display/panelexport.h
+    src/display/pngwriter.cpp
+    src/display/pngwriter.h
     src/web/configserver.cpp
     src/web/configserver.h
     ${RGBMATRIX_SOURCES}
@@ -123,6 +133,7 @@ target_link_libraries(hub75stock PRIVATE
     Qt6::Network
     Qt6::HttpServer
     PkgConfig::QRencode
+    ZLIB::ZLIB
     rt
     m
     pthread

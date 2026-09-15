@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_TEXTUTIL_H
 #define HUB75_TEXTUTIL_H
 

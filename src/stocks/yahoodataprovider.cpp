@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "yahoodataprovider.h"
 
 #include <QDateTime>
+#include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -25,6 +28,17 @@ constexpr int kMaxConcurrent = 4;
 // requests carrying no/an unusual User-Agent.
 const char *kUserAgent = "Mozilla/5.0 (X11; Linux x86_64) hub75stock/1.0";
 
+// Without an explicit timeout, a request that hangs rather than cleanly
+// failing (confirmed for real: a burst of "Connection closed" errors on
+// every in-flight symbol at once, then total silence from every later poll
+// - no new success or failure logged for any symbol, ever) never emits
+// QNetworkReply::finished() at all, so handleReply() never runs, inFlight_
+// never decrements, and that request's queue slot is gone for the rest of
+// the process's life. 20s is generous next to how small this response is,
+// while still comfortably clear of even the shortest allowed
+// updateIntervalSeconds (60s).
+constexpr int kRequestTimeoutMs = 20000;
+
 } // namespace
 
 YahooDataProvider::YahooDataProvider(QObject *parent) : QObject(parent) {}
@@ -39,6 +53,21 @@ void YahooDataProvider::ensureSymbols(const QVector<Symbol> &symbols)
 
 void YahooDataProvider::update()
 {
+    // If the previous round left any symbol failed, force fresh TCP/TLS
+    // connections for this retry rather than risk reusing ones that may
+    // have gone stale in the meantime - confirmed for real on live
+    // hardware: a burst of near-simultaneous "Connection closed" errors
+    // (Qt's own qt.network.http2 log category) across every symbol that
+    // happened to be in flight at once, the signature of a shared HTTP/2
+    // connection the far end had already closed by the time this app tried
+    // to reuse it for the next poll. Only done when recovering from a
+    // failure, not on every single poll - a longer, healthy-running
+    // interval (see updateIntervalSeconds) actually makes a connection
+    // going stale between polls *more* likely, not less, so this matters
+    // more now than it would have at a fixed 60s cadence, not less.
+    if (hasDataIssue())
+        network_.clearConnectionCache();
+
     // Refills the queue with every known symbol; fetchNext() drains it
     // kMaxConcurrent at a time. If the previous round is somehow still
     // running (a slow connection), a symbol already pending just doesn't
@@ -68,6 +97,7 @@ void YahooDataProvider::fetchNext()
 
         QNetworkRequest request(url);
         request.setHeader(QNetworkRequest::UserAgentHeader, QByteArray(kUserAgent));
+        request.setTransferTimeout(kRequestTimeoutMs);
 
         ++inFlight_;
         QNetworkReply *reply = network_.get(request);
@@ -85,24 +115,44 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     // On any failure, simply leave byKey_'s existing entry (if any) alone -
     // the next update() cycle tries again; there's no partial/corrupt state
     // to clean up since a snapshot is only ever replaced wholesale, below.
-    if (reply->error() != QNetworkReply::NoError)
+    // Every early-return path below logs why, via qWarning - previously none
+    // of this was visible anywhere, so a fetch that silently started failing
+    // partway through a session (e.g. Yahoo rate-limiting a long-polling
+    // client) left the chart frozen with no trace of the cause. Under the
+    // systemd service these land in the journal (`journalctl -u hub75stock`).
+    if (reply->error() != QNetworkReply::NoError) {
+        qWarning() << "YahooDataProvider: fetch failed for" << symbol.toConfigString()
+                   << "-" << reply->errorString();
+        lastFetchFailed_.insert(symbol.toConfigString(), true);
         return;
+    }
 
     const QJsonObject chart = QJsonDocument::fromJson(reply->readAll())
                                    .object().value(QStringLiteral("chart")).toObject();
-    if (!chart.value(QStringLiteral("error")).isNull())
+    const QJsonValue chartError = chart.value(QStringLiteral("error"));
+    if (!chartError.isNull()) {
+        qWarning() << "YahooDataProvider: Yahoo returned an error for" << symbol.toConfigString()
+                   << "-" << chartError;
+        lastFetchFailed_.insert(symbol.toConfigString(), true);
         return;
+    }
     const QJsonArray results = chart.value(QStringLiteral("result")).toArray();
-    if (results.isEmpty())
+    if (results.isEmpty()) {
+        qWarning() << "YahooDataProvider: empty result array for" << symbol.toConfigString();
+        lastFetchFailed_.insert(symbol.toConfigString(), true);
         return;
+    }
 
     const QJsonObject result = results.first().toObject();
     const QJsonObject meta = result.value(QStringLiteral("meta")).toObject();
     const QJsonArray timestamps = result.value(QStringLiteral("timestamp")).toArray();
     const QJsonArray quoteArr = result.value(QStringLiteral("indicators")).toObject()
                                       .value(QStringLiteral("quote")).toArray();
-    if (timestamps.isEmpty() || quoteArr.isEmpty())
+    if (timestamps.isEmpty() || quoteArr.isEmpty()) {
+        qWarning() << "YahooDataProvider: no timestamp/quote data for" << symbol.toConfigString();
+        lastFetchFailed_.insert(symbol.toConfigString(), true);
         return;
+    }
 
     const QJsonObject quote = quoteArr.first().toObject();
     const QJsonArray opens = quote.value(QStringLiteral("open")).toArray();
@@ -219,8 +269,12 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
         }
     }
 
-    if (aggregated.isEmpty())
-        return; // nothing usable in this response - keep the old snapshot
+    if (aggregated.isEmpty()) {
+        qWarning() << "YahooDataProvider: response for" << symbol.toConfigString()
+                   << "had no usable (non-null) bars - keeping previous snapshot";
+        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        return;
+    }
 
     // "Daily change" is measured against the *previous trading day's
     // close* - the same convention every ticker/chart site uses - not
@@ -270,17 +324,28 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     snapshot.referencePrice = referencePrice;
     snapshot.lastPrice = lastPrice;
     snapshot.buckets = buckets;
+    snapshot.sessionAnchorEpoch = firstTimestamp;
 
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     snapshot.marketOpen = sessionStart > 0 && now >= sessionStart && now <= sessionEnd;
 
     byKey_.insert(symbol.toConfigString(), snapshot);
+    lastFetchFailed_.insert(symbol.toConfigString(), false);
 }
 
 const StockSnapshot *YahooDataProvider::snapshot(const Symbol &symbol) const
 {
     const auto it = byKey_.constFind(symbol.toConfigString());
     return it == byKey_.constEnd() ? nullptr : &it.value();
+}
+
+bool YahooDataProvider::hasDataIssue() const
+{
+    for (auto it = lastFetchFailed_.constBegin(); it != lastFetchFailed_.constEnd(); ++it) {
+        if (it.value())
+            return true;
+    }
+    return false;
 }
 
 } // namespace hub75

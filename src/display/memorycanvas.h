@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_MEMORYCANVAS_H
 #define HUB75_MEMORYCANVAS_H
 
@@ -27,9 +29,15 @@ public:
     // line). Panel boundaries are marked so the arrangement is easy to check.
     QString toAnsi(int panelWidth, int panelHeight) const;
 
-private:
+    // RGB triplet at (x, y); out of bounds is undefined (callers already
+    // know the canvas's own width()/height()). Used by panelexport.cpp to
+    // read back text rendered into a throwaway MemoryCanvas via the
+    // library's own DrawText(), rather than pulling in Qt's font/painter
+    // stack (which needs a QGuiApplication - this project only runs a
+    // QCoreApplication - and crashes without one, confirmed directly).
     const uint8_t *pixel(int x, int y) const;
 
+private:
     int width_ = 0;
     int height_ = 0;
     QByteArray data_;

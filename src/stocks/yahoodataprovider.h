@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_YAHOODATAPROVIDER_H
 #define HUB75_YAHOODATAPROVIDER_H
 
@@ -35,6 +37,7 @@ public:
     void ensureSymbols(const QVector<Symbol> &symbols) override;
     void update() override;
     const StockSnapshot *snapshot(const Symbol &symbol) const override;
+    bool hasDataIssue() const override;
 
 private:
     void fetchNext();
@@ -44,6 +47,11 @@ private:
     QVector<Symbol> symbols_;
     QVector<Symbol> pending_; // queued for this update() round, not yet fetched
     QHash<QString, StockSnapshot> byKey_; // keyed by Symbol::toConfigString()
+    // Outcome of the most recent fetch attempt per symbol - only ever set by
+    // handleReply(), never cleared elsewhere, so a symbol with no entry yet
+    // (nothing has completed since startup) correctly reads as "no known
+    // issue" rather than a false-positive error at boot.
+    QHash<QString, bool> lastFetchFailed_;
     int inFlight_ = 0;
 };
 

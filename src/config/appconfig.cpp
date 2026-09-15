@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "appconfig.h"
 
 #include <QFile>
@@ -138,7 +140,7 @@ bool parseGlobal(const QJsonObject &obj, GlobalConfig *cfg, QString *error)
 {
     const QString ctx = QStringLiteral("global");
 
-    if (!readInt(obj, QStringLiteral("updateIntervalSeconds"), ctx, 1, 60,
+    if (!readInt(obj, QStringLiteral("updateIntervalSeconds"), ctx, 60, 900,
                  &cfg->updateIntervalSeconds, error))
         return false;
     if (!readInt(obj, QStringLiteral("rotationSeconds"), ctx, 1, 3600,
@@ -363,8 +365,8 @@ bool AppConfig::validate(QString *error) const
         occupied.insert(key);
     }
 
-    if (global_.updateIntervalSeconds < 1 || global_.updateIntervalSeconds > 60) {
-        *error = QStringLiteral("global.updateIntervalSeconds: %1 is out of range (1..60)")
+    if (global_.updateIntervalSeconds < 60 || global_.updateIntervalSeconds > 900) {
+        *error = QStringLiteral("global.updateIntervalSeconds: %1 is out of range (60..900)")
                      .arg(global_.updateIntervalSeconds);
         return false;
     }

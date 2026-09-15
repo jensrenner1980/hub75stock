@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_MOCKPROVIDER_H
 #define HUB75_MOCKPROVIDER_H
 

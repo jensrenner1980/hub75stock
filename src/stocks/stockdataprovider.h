@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_STOCKDATAPROVIDER_H
 #define HUB75_STOCKDATAPROVIDER_H
 
@@ -27,6 +29,15 @@ public:
 
     // nullptr if the symbol hasn't produced any data yet.
     virtual const StockSnapshot *snapshot(const Symbol &symbol) const = 0;
+
+    // True if the most recent fetch attempt for any tracked symbol failed
+    // (network error, or Yahoo itself returning an API-level error) - drives
+    // the on-screen connectivity indicator's fourth state, distinguishing
+    // "network is fine but the data source is failing" from an ordinary
+    // quiet chart (market closed, or between minute bars). Defaults to false
+    // so MockDataProvider - which never fails - doesn't need to override
+    // this at all.
+    virtual bool hasDataIssue() const { return false; }
 };
 
 } // namespace hub75

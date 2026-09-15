@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "matrixwall.h"
 
 #include "memorycanvas.h"
@@ -187,6 +189,12 @@ void MatrixWall::clear()
         backBuffer_->Clear();
     else if (offscreen_)
         offscreen_->Clear();
+    // Goes straight to the underlying canvas above (not through each
+    // PanelView's own Clear()), so each panel's shadow buffer (see
+    // PanelView::shadowPixel(), used for PNG export) needs clearing
+    // separately here to stay in step with the real per-frame clear.
+    for (PanelView *view : panelOrder_)
+        view->clearShadow();
 }
 
 void MatrixWall::present()

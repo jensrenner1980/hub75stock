@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "stockrenderer.h"
 
 #include "config/appconfig.h"
@@ -9,6 +11,8 @@
 
 #include "graphics.h"
 
+#include <QDate>
+#include <QDateTime>
 #include <QString>
 #include <algorithm>
 #include <cmath>
@@ -31,6 +35,7 @@ const Color kGrey(140, 140, 140);
 const Color kIndicatorNone(255, 0, 128);   // magenta - no WiFi link at all
 const Color kIndicatorWifiOnly(255, 140, 0); // amber - WiFi up, no internet
 const Color kIndicatorOnline(0, 140, 255);  // blue - online
+const Color kIndicatorDataIssue(255, 0, 0); // red - online, but data fetch is failing
 
 Color dim(const Color &c, int divisor = 4)
 {
@@ -56,13 +61,88 @@ Color trendColor(const StockSnapshot &snapshot)
     return changePercent > 0.0f ? kGreen : kRed;
 }
 
+// Per-point colour for Line/Area mode: green above the session's reference
+// price, red below - the same convention real intraday stock charts use
+// (Yahoo Finance, Robinhood, Google Finance), rather than trendColor()'s one
+// verdict for the whole session based only on where it ended up. That
+// matters for real: a stock that dipped below its reference mid-session and
+// recovered used to render as one solid colour for the entire chart,
+// hiding the dip entirely - this shows it. No "near enough to flat" white
+// band here (unlike trendColor()) - white is reserved for "no reference
+// price known at all" (referencePrice <= 0, meaning even Yahoo's own
+// fallback-to-today's-open never resolved), which should be rare in
+// practice.
+//
+// Deliberately not shared with Candles mode: a candle's colour already
+// means something different and, for that chart type, more standard - its
+// own open vs. its own close within that time slice, not vs. the session's
+// reference price. Real candlestick charts everywhere use that convention;
+// keeping it means Candles mode isn't touched by this at all.
+Color baselinePointColor(float price, float referencePrice)
+{
+    if (referencePrice <= 0.0f)
+        return kWhite;
+    return price >= referencePrice ? kGreen : kRed;
+}
+
+// True if the displayed session's own first bar (StockSnapshot::
+// sessionAnchorEpoch) isn't from today (the viewer's local calendar day) -
+// i.e. this isn't just "after hours", it's a stale, previous day's frozen
+// session (e.g. Friday's close still showing Monday morning before the next
+// open - confirmed for real, see YahooDataProvider's own comments on why
+// the response metadata's session start/end can't be used for this: before
+// today's own session has started, that metadata already describes today's
+// *upcoming* session even while the actual bars shown are still yesterday's
+// - so "now < metadata's own session start" alone can't tell "after hours,
+// same day" and "before open, stale from yesterday" apart; the anchor's own
+// calendar date can). 0 (MockDataProvider's synthetic sessions, which are
+// always "today" by construction) is never stale.
+bool isStaleSession(qint64 sessionAnchorEpoch)
+{
+    if (sessionAnchorEpoch <= 0)
+        return false;
+    return QDateTime::fromSecsSinceEpoch(sessionAnchorEpoch).date() != QDate::currentDate();
+}
+
 // Applies the configured closed-market styling on top of an otherwise-normal
-// colour choice. Grey overrides to a neutral colour; Normal passes through
-// unchanged; Blank is handled by the caller (it skips drawing instead).
-Color applyMarketState(const Color &normal, bool marketOpen, ClosedMarketStyle style)
+// colour choice, for everything *except* the last-price figure (see
+// applyPriceMarketState() below for that one) - the chart body and the
+// day's % change stay at full, undimmed colour the whole time the session
+// being shown is merely "after hours", not actually stale. They're still
+// exactly correct regardless of whether the market happens to be open right
+// now: the chart is a complete record of the whole day so far, and the
+// day's change is the real, final number once the session's over - neither
+// one is any less true for the market being closed, so neither dims for
+// that reason. Grey still applies once the session itself is stale (see
+// isStaleSession()) - a previous day's frozen close is a fundamentally
+// different situation, not just "closed for now". Normal always passes
+// normal through unchanged regardless of any of this; Blank is handled by
+// the caller (it skips drawing instead).
+Color applyMarketState(const Color &normal, bool marketOpen, bool staleSession,
+                       ClosedMarketStyle style)
+{
+    if (marketOpen || style != ClosedMarketStyle::Grey || !staleSession)
+        return normal;
+    return kGrey;
+}
+
+// Applies the configured closed-market styling to the last-price figure
+// specifically - the one element that dims for "after hours, same day" (see
+// applyMarketState() above for why everything else doesn't): unlike the
+// chart or the day's change, the last price genuinely stops being live the
+// moment the market closes and won't move again until the next session, so
+// it's the one number actually made less true by the market being shut.
+// Dimming just this, rather than the whole panel, keeps the display at
+// whatever brightness was configured for trading hours almost all the time,
+// with a small, specific cue instead of a broad visual shift twice a day.
+// Grey once the session itself is stale, same as everywhere else.
+Color applyPriceMarketState(const Color &normal, bool marketOpen, bool staleSession,
+                            ClosedMarketStyle style)
 {
     if (marketOpen || style == ClosedMarketStyle::Normal)
         return normal;
+    if (!staleSession)
+        return dim(normal, 2);
     if (style == ClosedMarketStyle::Grey)
         return kGrey;
     return normal; // Blank is handled before we get here
@@ -124,17 +204,34 @@ void renderList(PanelView *panel, const DisplayConfig &display, const GlobalConf
             continue;
         }
 
-        const Color color = applyMarketState(trendColor(*snapshot), snapshot->marketOpen,
-                                            global.closedMarketStyle);
         if (!snapshot->marketOpen && global.closedMarketStyle == ClosedMarketStyle::Blank)
             continue;
 
-        const QString text = QStringLiteral("%1 %2 %3")
-                                  .arg(ticker, -4)
-                                  .arg(formatPrice(snapshot->lastPrice), 6)
-                                  .arg(formatChangePercent(snapshot->dailyChangePercent()), 4);
-        rgb_matrix::DrawText(panel, font, 0, baseline, color, nullptr,
-                             text.toUtf8().constData(), 0);
+        const bool stale = isStaleSession(snapshot->sessionAnchorEpoch);
+        const Color priceColor = applyPriceMarketState(kWhite, snapshot->marketOpen, stale,
+                                                       global.closedMarketStyle);
+        const Color changeColor = applyMarketState(trendColor(*snapshot), snapshot->marketOpen,
+                                                  stale, global.closedMarketStyle);
+
+        // Three separate draws, not one coloured string - the ticker stays
+        // plain white regardless of market state (same as chart mode's
+        // header always has), only the price dims for "after hours, same
+        // day" (see applyPriceMarketState()), and the change keeps its real
+        // trend colour throughout, dropping to grey only once the session
+        // itself is stale. Each segment starts where the previous one's
+        // DrawText() reports it actually ended, rather than hand-computing
+        // pixel offsets from the fixed-width font's glyph size.
+        int x = rgb_matrix::DrawText(panel, font, 0, baseline, kWhite, nullptr,
+                                     QStringLiteral("%1 ").arg(ticker, -4).toUtf8().constData(), 0);
+        x = rgb_matrix::DrawText(
+            panel, font, x, baseline, priceColor, nullptr,
+            QStringLiteral("%1 ").arg(formatPrice(snapshot->lastPrice), 6).toUtf8().constData(), 0);
+        rgb_matrix::DrawText(
+            panel, font, x, baseline, changeColor, nullptr,
+            QStringLiteral("%1").arg(formatChangePercent(snapshot->dailyChangePercent()), 4)
+                .toUtf8()
+                .constData(),
+            0);
     }
 }
 
@@ -160,10 +257,11 @@ void drawHeader(PanelView *panel, const Symbol &symbol, const StockSnapshot *sna
     if (blank)
         return;
 
-    const Color changeColor = applyMarketState(trendColor(*snapshot), snapshot->marketOpen,
+    const bool stale = isStaleSession(snapshot->sessionAnchorEpoch);
+    const Color changeColor = applyMarketState(trendColor(*snapshot), snapshot->marketOpen, stale,
                                               global.closedMarketStyle);
-    const Color priceColor = applyMarketState(kWhite, snapshot->marketOpen,
-                                             global.closedMarketStyle);
+    const Color priceColor = applyPriceMarketState(kWhite, snapshot->marketOpen, stale,
+                                                  global.closedMarketStyle);
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline(), priceColor,
                               formatPrice(snapshot->lastPrice));
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline() + 6, changeColor,
@@ -205,8 +303,17 @@ void drawCandles(PanelView *panel, const QVector<PriceBucket> &buckets, int star
 }
 
 void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int startColumn,
-                    float minPrice, float maxPrice, const Color &color, bool filled)
+                    float minPrice, float maxPrice, float referencePrice, bool marketOpen,
+                    bool staleSession, ClosedMarketStyle closedStyle, bool filled)
 {
+    // Where the baseline itself sits on screen, for the area fill below to
+    // stop at rather than running all the way to the chart's bottom edge -
+    // see baselinePointColor()'s own comment for why. Degrades to the old
+    // "fill straight to the bottom" behaviour if there's no reference price
+    // to anchor to at all (referencePrice <= 0, expected to be rare).
+    const int referenceY =
+        referencePrice > 0.0f ? mapPriceToY(referencePrice, minPrice, maxPrice) : kChartBottom;
+
     int prevX = -1;
     int prevY = 0;
     int prevIndex = -1; // buckets[] index of the last real point drawn
@@ -217,39 +324,66 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         const int x = startColumn + i;
         if (x < 0 || x >= panel->width())
             continue;
-        const int y = mapPriceToY(buckets.at(i).close, minPrice, maxPrice);
+        const float price = buckets.at(i).close;
+        const int y = mapPriceToY(price, minPrice, maxPrice);
+        const Color pointColor = applyMarketState(baselinePointColor(price, referencePrice),
+                                                 marketOpen, staleSession, closedStyle);
 
         // A segment connecting two real points that aren't in adjacent
         // slots bridges one or more no-trades gaps - drawn dimmed (not a
-        // separate colour: whatever "color" already is here, green/red/
-        // white when the market's open, grey when closed and styled that
-        // way) rather than at full brightness. Distinguishing by
-        // brightness rather than hue means this needs no special-casing
-        // against the closed-market grey styling - dim grey still reads as
-        // "different from" full grey - and doesn't reuse a colour already
-        // spoken for by the connectivity indicator. Still a plain line for
-        // legibility (it's still useful to see the overall day's shape
-        // without gaps chopping the chart into disconnected specks), but
-        // visually flagged as "no data here", not a claim that the price
-        // moved smoothly/gradually through a stretch we simply have no
-        // information about.
+        // separate colour: whatever this point's own green/red/white
+        // colour already is, or grey when closed and styled that way)
+        // rather than at full brightness. Distinguishing by brightness
+        // rather than hue means this needs no special-casing against the
+        // closed-market grey styling - dim grey still reads as "different
+        // from" full grey - and doesn't reuse a colour already spoken for
+        // by the connectivity indicator. Still a plain line for legibility
+        // (it's still useful to see the overall day's shape without gaps
+        // chopping the chart into disconnected specks), but visually
+        // flagged as "no data here", not a claim that the price moved
+        // smoothly/gradually through a stretch we simply have no
+        // information about. Coloured by the destination (this) point,
+        // same simplification every point-to-point chart makes rather than
+        // splitting a segment's colour exactly where it crosses the
+        // baseline.
         const bool bridgesGap = prevX >= 0 && (i - prevIndex) > 1;
-        const Color segmentColor = bridgesGap ? dim(color) : color;
+        const Color segmentColor = bridgesGap ? dim(pointColor) : pointColor;
 
-        // Every "x" reaching this point is a real data point's own column -
-        // the gap columns in between were already skipped via `continue`
-        // above and never get a fill drawn for them at all, bridged or not.
-        // So there's no "solid block spanning the gap" to withhold here;
-        // this is always just this one real point's own instant, and always
-        // gets its normal fill regardless of how the line reaching it is
-        // coloured.
-        if (filled)
-            rgb_matrix::DrawLine(panel, x, y + 1, x, kChartBottom, dim(color));
+        // Fills from this point to the baseline, not to the chart's bottom
+        // edge - green fill sits between the point and the baseline when
+        // the point is above it, red fill the same when below, matching
+        // the real baseline-chart convention this whole thing is modelled
+        // on rather than one solid colour block from top to bottom
+        // regardless of which side of the baseline the price actually sits
+        // on. Every "x" reaching this point is a real data point's own
+        // column - the gap columns in between were already skipped via
+        // `continue` above and never get a fill drawn for them at all,
+        // bridged or not - so there's no "solid block spanning the gap" to
+        // withhold here either.
+        //
+        // The fill deliberately never reaches referenceY itself (stops one
+        // row short on either side) - filling all the way through it
+        // painted over drawReferenceLine()'s dashed marker on essentially
+        // every column with real data, making it invisible in practice
+        // rather than just "occasionally drawn over", which defeated the
+        // point of having it. Leaving that one row alone keeps it visible -
+        // as an actual dash where the dash pattern lands, and as a thin gap
+        // in the fill elsewhere, which reads as a continuous baseline groove
+        // across the whole chart width instead of just isolated dashes.
+        if (filled) {
+            const Color fillColor = dim(pointColor);
+            if (y <= referenceY - 2)
+                rgb_matrix::DrawLine(panel, x, y + 1, x, referenceY - 1, fillColor);
+            else if (y >= referenceY + 2)
+                rgb_matrix::DrawLine(panel, x, referenceY + 1, x, y - 1, fillColor);
+            // Within one row of the baseline (or exactly on it): nothing to
+            // fill without touching referenceY itself.
+        }
 
         if (prevX >= 0)
             rgb_matrix::DrawLine(panel, prevX, prevY, x, y, segmentColor);
         else
-            panel->SetPixel(x, y, color.r, color.g, color.b);
+            panel->SetPixel(x, y, pointColor.r, pointColor.g, pointColor.b);
         prevX = x;
         prevY = y;
         prevIndex = i;
@@ -283,7 +417,7 @@ void drawReferenceLine(PanelView *panel, float referencePrice, int startColumn, 
 }
 
 void drawChart(PanelView *panel, const StockSnapshot &snapshot, DisplayMode mode,
-              const Color &trend)
+              ClosedMarketStyle closedStyle)
 {
     const QVector<PriceBucket> &buckets = snapshot.buckets;
     if (buckets.isEmpty())
@@ -333,15 +467,19 @@ void drawChart(PanelView *panel, const StockSnapshot &snapshot, DisplayMode mode
 
     drawReferenceLine(panel, snapshot.referencePrice, startColumn, visibleCount, minPrice, maxPrice);
 
+    const bool staleSession = isStaleSession(snapshot.sessionAnchorEpoch);
+
     switch (mode) {
     case DisplayMode::Candles:
         drawCandles(panel, visible, startColumn, minPrice, maxPrice);
         break;
     case DisplayMode::Area:
-        drawLineOrArea(panel, visible, startColumn, minPrice, maxPrice, trend, /*filled=*/true);
+        drawLineOrArea(panel, visible, startColumn, minPrice, maxPrice, snapshot.referencePrice,
+                      snapshot.marketOpen, staleSession, closedStyle, /*filled=*/true);
         break;
     case DisplayMode::Line:
-        drawLineOrArea(panel, visible, startColumn, minPrice, maxPrice, trend, /*filled=*/false);
+        drawLineOrArea(panel, visible, startColumn, minPrice, maxPrice, snapshot.referencePrice,
+                      snapshot.marketOpen, staleSession, closedStyle, /*filled=*/false);
         break;
     case DisplayMode::StockList:
         break; // unreachable - renderStockPanel() dispatches list mode to renderList()
@@ -372,9 +510,7 @@ void renderChart(PanelView *panel, const DisplayConfig &display, const GlobalCon
     if (!snapshot->marketOpen && global.closedMarketStyle == ClosedMarketStyle::Blank)
         return;
 
-    const Color trend = applyMarketState(trendColor(*snapshot), snapshot->marketOpen,
-                                        global.closedMarketStyle);
-    drawChart(panel, *snapshot, display.mode, trend);
+    drawChart(panel, *snapshot, display.mode, global.closedMarketStyle);
 }
 
 } // namespace
@@ -400,7 +536,8 @@ void renderStockPanel(PanelView *panel, const DisplayConfig &display, const AppC
     }
 }
 
-void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state)
+void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state,
+                                 bool dataIssue)
 {
     Color color = kIndicatorNone;
     switch (state) {
@@ -411,7 +548,7 @@ void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State st
         color = kIndicatorWifiOnly;
         break;
     case ConnectivityMonitor::State::Online:
-        color = kIndicatorOnline;
+        color = dataIssue ? kIndicatorDataIssue : kIndicatorOnline;
         break;
     }
 

@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "configserver.h"
 
 #include "config/appconfig.h"
+#include "display/panelexport.h"
+#include "display/panelview.h"
 
 #include <QFile>
 #include <QHttpServerRequest>
@@ -9,6 +13,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QStringList>
 #include <QUrlQuery>
 #include <QVector>
 
@@ -49,8 +54,12 @@ const char *kPageStyle =
 
 } // namespace
 
-ConfigWebServer::ConfigWebServer(QString configPath)
+ConfigWebServer::ConfigWebServer(QString configPath, QVector<PanelView *> panels,
+                                 FontStore *fonts, QString exportDir)
     : configPath_(std::move(configPath))
+    , panels_(std::move(panels))
+    , fonts_(fonts)
+    , exportDir_(std::move(exportDir))
 {
     server_.route(QStringLiteral("/"), QHttpServerRequest::Method::Get,
                   [this]() { return QHttpServerResponse("text/html; charset=utf-8",
@@ -58,6 +67,9 @@ ConfigWebServer::ConfigWebServer(QString configPath)
 
     server_.route(QStringLiteral("/save"), QHttpServerRequest::Method::Post,
                   [this](const QHttpServerRequest &request) { return handleSave(request); });
+
+    server_.route(QStringLiteral("/export"), QHttpServerRequest::Method::Post,
+                  [this](const QHttpServerRequest &request) { return handleExport(request); });
 }
 
 bool ConfigWebServer::start(quint16 port, QString *error)
@@ -117,8 +129,8 @@ QString ConfigWebServer::renderForm(const QString *statusMessage) const
 
     html += QStringLiteral("<h2>Timing</h2>");
     html += QStringLiteral(
-        "<label>Data update interval (1-60 s)<br><input type=\"number\" "
-        "name=\"updateIntervalSeconds\" min=\"1\" max=\"60\" value=\"%1\"></label>")
+        "<label>Data update interval (60-900 s)<br><input type=\"number\" "
+        "name=\"updateIntervalSeconds\" min=\"60\" max=\"900\" value=\"%1\"></label>")
                 .arg(config.global().updateIntervalSeconds);
     html += QStringLiteral(
         "<label>Rotation interval (1-3600 s)<br><input type=\"number\" "
@@ -178,7 +190,21 @@ QString ConfigWebServer::renderForm(const QString *statusMessage) const
         }
     }
 
-    html += QStringLiteral("<button type=\"submit\">Save</button></form></body></html>");
+    html += QStringLiteral("<button type=\"submit\">Save</button></form>");
+
+    if (!panels_.isEmpty()) {
+        html += QStringLiteral(
+            "<h2>Export</h2>"
+            "<form method=\"post\" action=\"/export\">"
+            "<p class=\"note\">Saves a PNG snapshot of every panel's currently displayed "
+            "view (whatever's actually on screen right now) to %1 on the device, one file "
+            "per panel.</p>"
+            "<button type=\"submit\">Export current view as PNG</button>"
+            "</form>")
+                    .arg(htmlEscape(exportDir_));
+    }
+
+    html += QStringLiteral("</body></html>");
     return html;
 }
 
@@ -303,6 +329,37 @@ QHttpServerResponse ConfigWebServer::handleSave(const QHttpServerRequest &reques
 
     const QString message = QStringLiteral(
         "<div class=\"ok\">Saved. Restart hub75stock for these changes to take effect.</div>");
+    return QHttpServerResponse("text/html; charset=utf-8", renderForm(&message).toUtf8().constData());
+}
+
+QHttpServerResponse ConfigWebServer::handleExport(const QHttpServerRequest & /*request*/)
+{
+    if (!fonts_ || panels_.isEmpty()) {
+        const QString message =
+            QStringLiteral("<div class=\"error\">Nothing to export.</div>");
+        return QHttpServerResponse("text/html; charset=utf-8", renderForm(&message).toUtf8().constData(),
+                                   QHttpServerResponder::StatusCode::InternalServerError);
+    }
+
+    int succeeded = 0;
+    QStringList failures;
+    for (const PanelView *panel : panels_) {
+        QString error;
+        if (exportPanelPng(*panel, *fonts_, exportDir_, &error))
+            ++succeeded;
+        else
+            failures << QStringLiteral("R%1C%2: %3")
+                            .arg(panel->row()).arg(panel->column()).arg(error);
+    }
+
+    QString message;
+    if (failures.isEmpty()) {
+        message = QStringLiteral("<div class=\"ok\">Exported %1 panel(s) to %2.</div>")
+                      .arg(succeeded).arg(htmlEscape(exportDir_));
+    } else {
+        message = QStringLiteral("<div class=\"error\">Exported %1 panel(s), %2 failed: %3</div>")
+                      .arg(succeeded).arg(failures.size()).arg(htmlEscape(failures.join(QStringLiteral("; "))));
+    }
     return QHttpServerResponse("text/html; charset=utf-8", renderForm(&message).toUtf8().constData());
 }
 

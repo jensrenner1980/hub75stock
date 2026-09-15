@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #ifndef HUB75_PANELVIEW_H
 #define HUB75_PANELVIEW_H
 
 #include "canvas.h"
+
+#include <QByteArray>
+#include <cstdint>
 
 namespace hub75 {
 
@@ -38,6 +43,15 @@ public:
     void Clear() override;
     void Fill(uint8_t red, uint8_t green, uint8_t blue) override;
 
+    // A plain in-memory mirror of whatever was last drawn to this panel,
+    // updated alongside every SetPixel()/Fill() - separate from target_,
+    // which on real hardware is a write-only, one-way GPIO output that
+    // can't itself be queried for "what's currently displayed" (see
+    // src/display/panelexport.h). Cleared by MatrixWall::clear() in step
+    // with the real frame clear, so it never lags a frame behind.
+    void clearShadow();
+    void shadowPixel(int x, int y, uint8_t *red, uint8_t *green, uint8_t *blue) const;
+
 private:
     rgb_matrix::Canvas *target_ = nullptr;
     int offsetX_ = 0;
@@ -46,6 +60,7 @@ private:
     int height_ = 0;
     int row_ = 0;
     int column_ = 0;
+    QByteArray shadow_; // width_*height_*3 bytes, RGB per pixel
 };
 
 } // namespace hub75

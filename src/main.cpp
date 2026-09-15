@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "config/appconfig.h"
 #include "display/fontstore.h"
 #include "display/matrixwall.h"
@@ -128,6 +130,7 @@ struct CommandLine {
     bool showConfig = false;
     int webConfigPort = 0; // 0 = disabled
     bool useMock = false;
+    QString exportDir;
 };
 
 QString defaultConfigPath()
@@ -249,6 +252,11 @@ int main(int argc, char *argv[])
         QStringLiteral("Use synthetic data instead of fetching real prices from Yahoo "
                        "Finance - for development/testing without a network, or just "
                        "exercising the display. Ignored with --pattern."));
+    const QCommandLineOption exportDirOption(
+        QStringLiteral("export-dir"),
+        QStringLiteral("Directory the web config form's \"Export current view as PNG\" "
+                       "button saves into. Created if it doesn't exist."),
+        QStringLiteral("path"), QStringLiteral("/tmp/hub75stock-exports"));
 
     parser.addOption(configOption);
     parser.addOption(patternOption);
@@ -258,6 +266,7 @@ int main(int argc, char *argv[])
     parser.addOption(dryRunOption);
     parser.addOption(showConfigOption);
     parser.addOption(webConfigPortOption);
+    parser.addOption(exportDirOption);
     parser.addOption(mockOption);
 
     // The command line carries two families of options: ours, and the --led-*
@@ -292,6 +301,7 @@ int main(int argc, char *argv[])
     cli.dryRun = parser.isSet(dryRunOption);
     cli.showConfig = parser.isSet(showConfigOption);
     cli.useMock = parser.isSet(mockOption);
+    cli.exportDir = parser.value(exportDirOption);
 
     bool durationOk = false;
     cli.durationSeconds = parser.value(durationOption).toInt(&durationOk);
@@ -461,7 +471,7 @@ int main(int argc, char *argv[])
             if (display)
                 hub75::renderStockPanel(panel, *display, config, *stockData, fonts, elapsedMs);
             if (showConnectivityIndicator && panel->row() == 1 && panel->column() == 1)
-                hub75::renderConnectivityIndicator(panel, connectivityState);
+                hub75::renderConnectivityIndicator(panel, connectivityState, stockData->hasDataIssue());
         }
     };
 
@@ -493,7 +503,8 @@ int main(int argc, char *argv[])
     // Not fatal if it can't bind - the display is the app's actual job, the
     // web form is a convenience on top of it.
     if (cli.webConfigPort != 0) {
-        webConfig = std::make_unique<hub75::ConfigWebServer>(cli.configPath);
+        webConfig = std::make_unique<hub75::ConfigWebServer>(cli.configPath, wall->panels(),
+                                                             &fonts, cli.exportDir);
         if (!webConfig->start(static_cast<quint16>(cli.webConfigPort), &error)) {
             printError(QStringLiteral("Web config server: %1").arg(error));
             webConfig.reset();
@@ -558,7 +569,7 @@ int main(int argc, char *argv[])
     // QTimer only fires while started.
     QTimer dataTimer;
     if (!useTestPattern) {
-        dataTimer.setInterval(qBound(1, config.global().updateIntervalSeconds, 60) * 1000);
+        dataTimer.setInterval(qBound(60, config.global().updateIntervalSeconds, 900) * 1000);
         QObject::connect(&dataTimer, &QTimer::timeout, &app, [&]() { stockData->update(); });
         dataTimer.start();
     }
