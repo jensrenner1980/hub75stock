@@ -162,10 +162,33 @@ QString formatPrice(float price)
     return QString::number(price, 'f', 2);
 }
 
+// Maps an ISO 4217 code (StockSnapshot::currency) to the single-glyph
+// currency symbol embedded in the project's own fonts - $/€/£/¥ for the
+// four this project actually deals with, and the generic ISO "currency
+// sign" (¤) for anything else/unrecognised/empty (MockDataProvider before
+// it started setting a plausible one, or a real exchange in a currency
+// this table doesn't know) - more informative than showing nothing at all,
+// and every font glyph used here was confirmed to actually exist in
+// resources/fonts/4x6.bdf before relying on it (a missing glyph falls back
+// to the Unicode replacement character instead, which would look like a
+// rendering bug rather than "unknown currency").
+QChar currencySymbol(const QString &isoCode)
+{
+    if (isoCode == QStringLiteral("USD"))
+        return QLatin1Char('$');
+    if (isoCode == QStringLiteral("EUR"))
+        return QChar(0x20AC); // Euro sign
+    if (isoCode == QStringLiteral("GBP"))
+        return QChar(0x00A3); // pound sterling
+    if (isoCode == QStringLiteral("JPY"))
+        return QChar(0x00A5); // yen
+    return QChar(0x00A4); // generic ISO 4217 currency sign
+}
+
 // "+3.2" / "-12.5" - signed percentage, 1 decimal, no "%" (added by the
-// caller if there's room - see drawHeader vs renderList). The sign is
-// always shown, matching the layout budget worked out for the list view
-// (ticker + price + change == 16 characters with no separators to spare).
+// caller - a literal "%" in chart mode's header, folded into renderList's
+// own compressed-width drawing for list mode - see drawCompressed()). The
+// sign is always shown.
 //
 // A percentage, not an absolute price difference - confirmed for real that
 // the two can tell noticeably different stories: for a higher-priced
@@ -179,6 +202,42 @@ QString formatChangePercent(float changePercent)
 {
     return (changePercent >= 0.0f ? QStringLiteral("+") : QStringLiteral("-"))
            + QString::number(std::abs(changePercent), 'f', 1);
+}
+
+// Draws text one glyph at a time rather than as a single fixed-pitch
+// DrawText() call, compressing '.' and ' ' from the 4x6 font's normal 4px
+// advance down to 2px each - frees exactly the width list mode needs to fit
+// a currency symbol before the price and a "%" after the change, within the
+// panel's fixed 64px line (see README "Compact list mode" for the exact
+// budget: 18 logical characters at 4px each is 72px, and the two
+// guaranteed separator spaces plus the two guaranteed decimal points - one
+// in the price, one in the change - save exactly the 8px difference).
+//
+// A space has no ink in any column, so simply not drawing it and advancing
+// 2px is entirely safe. A '.' is different: its own ink sits in column 1 of
+// its 4-wide cell, not column 0 (confirmed from the font's own bitmap), so
+// it's drawn one column *before* its "natural" slot - landing flush against
+// whatever precedes it (already blank there, from that glyph's own trailing
+// column) while still leaving a full 1px gap before whatever follows.
+// Simply truncating its advance without shifting the draw position would
+// instead leave the dot flush against the *next* character instead of the
+// previous one - worse, since every other glyph pairing on the line keeps
+// its usual 1px gap.
+int drawCompressed(PanelView *panel, const rgb_matrix::Font &font, int x, int baseline,
+                   const Color &color, const QString &text)
+{
+    for (const QChar &ch : text) {
+        if (ch == QLatin1Char(' ')) {
+            x += 2;
+            continue;
+        }
+        const bool isPeriod = ch == QLatin1Char('.');
+        const QString single(ch);
+        rgb_matrix::DrawText(panel, font, isPeriod ? x - 1 : x, baseline, color, nullptr,
+                             single.toUtf8().constData(), 0);
+        x += isPeriod ? 2 : 4;
+    }
+    return x;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,19 +278,16 @@ void renderList(PanelView *panel, const DisplayConfig &display, const GlobalConf
         // day" (see applyPriceMarketState()), and the change keeps its real
         // trend colour throughout, dropping to grey only once the session
         // itself is stale. Each segment starts where the previous one's
-        // DrawText() reports it actually ended, rather than hand-computing
-        // pixel offsets from the fixed-width font's glyph size.
-        int x = rgb_matrix::DrawText(panel, font, 0, baseline, kWhite, nullptr,
-                                     QStringLiteral("%1 ").arg(ticker, -4).toUtf8().constData(), 0);
-        x = rgb_matrix::DrawText(
-            panel, font, x, baseline, priceColor, nullptr,
-            QStringLiteral("%1 ").arg(formatPrice(snapshot->lastPrice), 6).toUtf8().constData(), 0);
-        rgb_matrix::DrawText(
-            panel, font, x, baseline, changeColor, nullptr,
-            QStringLiteral("%1").arg(formatChangePercent(snapshot->dailyChangePercent()), 4)
-                .toUtf8()
-                .constData(),
-            0);
+        // drawCompressed() reports it actually ended.
+        int x = drawCompressed(panel, font, 0, baseline, kWhite,
+                               QStringLiteral("%1 ").arg(ticker, -4));
+        x = drawCompressed(
+            panel, font, x, baseline, priceColor,
+            currencySymbol(snapshot->currency)
+                + QStringLiteral("%1 ").arg(formatPrice(snapshot->lastPrice), 6));
+        drawCompressed(panel, font, x, baseline, changeColor,
+                       QStringLiteral("%1%")
+                           .arg(formatChangePercent(snapshot->dailyChangePercent()), 4));
     }
 }
 
@@ -263,7 +319,7 @@ void drawHeader(PanelView *panel, const Symbol &symbol, const StockSnapshot *sna
     const Color priceColor = applyPriceMarketState(kWhite, snapshot->marketOpen, stale,
                                                   global.closedMarketStyle);
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline(), priceColor,
-                              formatPrice(snapshot->lastPrice));
+                              currencySymbol(snapshot->currency) + formatPrice(snapshot->lastPrice));
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline() + 6, changeColor,
                               formatChangePercent(snapshot->dailyChangePercent())
                                   + QStringLiteral("%"));
@@ -316,6 +372,7 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
 
     int prevX = -1;
     int prevY = 0;
+    Color prevColor = kWhite; // unused until prevX >= 0
     int prevIndex = -1; // buckets[] index of the last real point drawn
     for (int i = 0; i < buckets.size(); ++i) {
         if (!buckets.at(i).hasData)
@@ -342,12 +399,8 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         // chopping the chart into disconnected specks), but visually
         // flagged as "no data here", not a claim that the price moved
         // smoothly/gradually through a stretch we simply have no
-        // information about. Coloured by the destination (this) point,
-        // same simplification every point-to-point chart makes rather than
-        // splitting a segment's colour exactly where it crosses the
-        // baseline.
+        // information about.
         const bool bridgesGap = prevX >= 0 && (i - prevIndex) > 1;
-        const Color segmentColor = bridgesGap ? dim(pointColor) : pointColor;
 
         // Fills from this point to the baseline, not to the chart's bottom
         // edge - green fill sits between the point and the baseline when
@@ -380,12 +433,35 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
             // fill without touching referenceY itself.
         }
 
-        if (prevX >= 0)
+        // A segment whose two endpoints land on opposite sides of the
+        // baseline is split exactly where it crosses it, rather than
+        // painting the whole segment in just the destination point's
+        // colour - green above, red below, precisely at the baseline
+        // rather than one point late. y != prevY guards the degenerate
+        // case where both ends round to the same row despite differing
+        // colours (only possible right at the boundary) - nothing
+        // meaningful to interpolate there, so it falls back to the
+        // single-colour path like a non-crossing segment.
+        const bool crosses = prevX >= 0
+                             && (prevColor.r != pointColor.r || prevColor.g != pointColor.g
+                                 || prevColor.b != pointColor.b)
+                             && y != prevY;
+        if (crosses) {
+            const float t = (referenceY - prevY) / static_cast<float>(y - prevY);
+            const int crossX = prevX + static_cast<int>(std::lround(t * (x - prevX)));
+            const Color firstColor = bridgesGap ? dim(prevColor) : prevColor;
+            const Color secondColor = bridgesGap ? dim(pointColor) : pointColor;
+            rgb_matrix::DrawLine(panel, prevX, prevY, crossX, referenceY, firstColor);
+            rgb_matrix::DrawLine(panel, crossX, referenceY, x, y, secondColor);
+        } else if (prevX >= 0) {
+            const Color segmentColor = bridgesGap ? dim(pointColor) : pointColor;
             rgb_matrix::DrawLine(panel, prevX, prevY, x, y, segmentColor);
-        else
+        } else {
             panel->SetPixel(x, y, pointColor.r, pointColor.g, pointColor.b);
+        }
         prevX = x;
         prevY = y;
+        prevColor = pointColor;
         prevIndex = i;
     }
 }
@@ -423,22 +499,31 @@ void drawChart(PanelView *panel, const StockSnapshot &snapshot, DisplayMode mode
     if (buckets.isEmpty())
         return;
 
-    // Left-aligned: column 0 is the session's opening bucket, growing
-    // rightward as the day progresses, same mental model as "the chart
-    // builds up from the left at market open and finishes on the right at
-    // close" - not centred, which would put blank "no data yet" margin on
-    // both sides of a partial/sparse session instead of just on the right,
-    // where unelapsed/not-yet-happened time actually belongs. Was centred
-    // previously (a leftover from when MockDataProvider always populated a
-    // full kBucketCount buckets, so this only ever had a few px of cosmetic
-    // slack to place); with real, possibly sparse data - either early in a
+    // Left-aligned from a small fixed offset: column startColumn is the
+    // session's opening bucket, growing rightward as the day progresses,
+    // same mental model as "the chart builds up from the left at market
+    // open and finishes on the right at close" - not *proportionally*
+    // centred (i.e. not `(panel->width() - visibleCount) / 2`), which would
+    // put blank "no data yet" margin on both sides of a partial/sparse
+    // session instead of just on the right, where unelapsed/not-yet-happened
+    // time actually belongs. Was proportionally centred previously (a
+    // leftover from when MockDataProvider always populated a full
+    // kBucketCount buckets, so this only ever had a few px of cosmetic slack
+    // to place); with real, possibly sparse data - either early in a
     // session, or a thinly-traded listing - that produced an oddly
     // disconnected-looking handful of columns floating mid-panel instead of
-    // starting at the left edge like a real chart. Still falls back to
-    // showing the most recent history first if there's ever more data than
-    // columns, though in practice kBucketCount <= panel->width() always.
-    const int visibleCount = std::min(static_cast<int>(buckets.size()), panel->width());
-    const int startColumn = 0;
+    // starting near the left edge like a real chart.
+    //
+    // The fixed 2px offset below is a different thing, not a reintroduction
+    // of that bug: it's constant regardless of how much data is actually
+    // present, so a sparse session still starts building at column 2 (just
+    // doesn't reach as far right yet), never floating. It exists purely so
+    // the chart has a uniform 2px border on both sides once a session is
+    // fully populated: kBucketCount (60) + 2 + 2 == panel->width() (64)
+    // exactly.
+    const int startColumn = 2;
+    const int visibleCount =
+        std::min(static_cast<int>(buckets.size()), panel->width() - startColumn);
     const QVector<PriceBucket> visible = buckets.mid(buckets.size() - visibleCount);
 
     // Gap slots (hasData == false, see YahooDataProvider) default-construct
@@ -464,6 +549,17 @@ void drawChart(PanelView *panel, const StockSnapshot &snapshot, DisplayMode mode
     }
     if (!havePrice)
         return;
+
+    // Widen (never shrink) the range with the session's authoritative day
+    // high/low (see StockSnapshot::dayHigh/dayLow) - our own bucket data
+    // can undershoot the true extremes early in a session, or during
+    // Yahoo's reporting lag, if the tick that set the real high/low hasn't
+    // landed in a completed bucket yet. Guarded against 0 (unset - never a
+    // legitimate price) rather than assuming it's always populated.
+    if (snapshot.dayHigh > 0.0f)
+        maxPrice = std::max(maxPrice, snapshot.dayHigh);
+    if (snapshot.dayLow > 0.0f)
+        minPrice = std::min(minPrice, snapshot.dayLow);
 
     drawReferenceLine(panel, snapshot.referencePrice, startColumn, visibleCount, minPrice, maxPrice);
 

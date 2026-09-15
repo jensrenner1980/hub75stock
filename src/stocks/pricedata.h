@@ -5,6 +5,7 @@
 
 #include "config/symbol.h"
 
+#include <QString>
 #include <QVector>
 
 namespace hub75 {
@@ -58,6 +59,17 @@ struct StockSnapshot {
     // starting price instead - conceptually the same role, just without a
     // real "yesterday" behind it.
     float referencePrice = 0.0f;
+    // The currently-displayed price - Yahoo's own meta.regularMarketPrice
+    // for YahooDataProvider, a genuinely live tick-level figure rather than
+    // this session's last *completed* bucket's close (which can lag it by
+    // up to a whole bucket's width - 8.5 min for Xetra - since a bucket
+    // only closes once its time slice has fully elapsed). Falls back to the
+    // last bucket's close if that field is ever missing. Deliberately not
+    // required to exactly match the chart's own rightmost point for this
+    // reason - the header shows the most current number available, the
+    // chart shows the completed history; a small, momentary difference
+    // between the two right at the chart's leading edge is expected, not a
+    // bug.
     float lastPrice = 0.0f;
     bool marketOpen = true;
     // Epoch seconds of the displayed session's own first bar (for
@@ -72,6 +84,25 @@ struct StockSnapshot {
     // construction - see StockSnapshot::isValid() callers for how 0 is
     // treated (never stale).
     qint64 sessionAnchorEpoch = 0;
+    // ISO 4217 code ("USD", "EUR", ...) from Yahoo's own meta.currency -
+    // the actual reported trading currency, not inferred from the
+    // exchange (some exchanges list foreign stocks that don't trade in
+    // the exchange's own "home" currency). Empty for MockDataProvider's
+    // synthetic sessions if never set; the renderer falls back to a
+    // generic currency sign for anything empty/unrecognised.
+    QString currency;
+    // Today's official high/low from Yahoo's own meta.regularMarketDayHigh/
+    // Low - the exchange's authoritative day range, not derived from our
+    // own bucket array. Used only to *widen* the chart's auto-scaled
+    // vertical range (see drawChart() in stockrenderer.cpp), never to
+    // shrink it: our own bucket highs/lows can undershoot the true day
+    // extremes early in a session, or during Yahoo's own free-feed
+    // reporting lag, if the tick that set the real extreme hasn't made it
+    // into a completed bucket yet. 0 (unset) for MockDataProvider, which
+    // computes its own from its already-generated buckets instead - see
+    // MockDataProvider::generateSession().
+    float dayHigh = 0.0f;
+    float dayLow = 0.0f;
     QVector<PriceBucket> buckets; // 0..pricedata::kBucketCount, oldest first
 
     float dailyChange() const { return lastPrice - referencePrice; }

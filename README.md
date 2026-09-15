@@ -395,7 +395,26 @@ not spilling into the padding row.
 
 16 characters is enough for `TICKER PRICE CHANGE` with no truncation for
 normal cases, e.g. `NVDA 178.42 -1.9` (4 + 1 + 6 + 1 + 4 = 16) - one decimal
-place on the change value and no thousands separator, as suggested.
+place on the change value and no thousands separator, as suggested. This is
+what the `list16` bring-up pattern itself demonstrates, and the font
+geometry above still holds exactly.
+
+The live list mode (`renderList()` in `stockrenderer.cpp`, as opposed to the
+`list16` bring-up pattern) has since grown two more glyphs into that same
+64px line - a currency symbol before the price (from
+`StockSnapshot::currency`, Yahoo's own reported ISO 4217 code: `$`/`€`/`£`/`¥`,
+or a generic `¤` for anything else) and a `%` after the change - via
+`drawCompressed()`, which draws glyph-by-glyph instead of one fixed-pitch
+call and compresses `.` and ` ` from their normal 4px advance down to 2px
+each. 18 logical characters at 4px would be 72px, 8px over budget; the two
+guaranteed separator spaces (free - a space has no ink to protect in any
+column) plus the two guaranteed decimal points (price always has one,
+change always has one) save exactly that 8px. A `.`'s own ink sits in
+column 1 of its cell, not column 0, so it's drawn one column *before* its
+normal slot rather than just advanced less - flush against whatever
+precedes it (already blank there) while still leaving the usual 1px gap
+before whatever follows, rather than the dot ending up flush against the
+*next* character instead.
 
 **Readability at this size**: the font uses real disambiguation tricks (a
 slashed `0` vs plain `O`, a flagged `1` vs barred `I` vs plain `L`, `Q`'s tail
@@ -723,6 +742,23 @@ exchange isn't in the mapping table, see `Symbol::toYahooSymbol()`) just
 shows the renderer's existing dashed "no data yet" placeholder rather than
 anything crashing or hanging.
 
+Beyond the OHLC bars, the response's `meta` object carries a few more
+authoritative, server-computed fields this project uses directly rather
+than deriving its own equivalents: `regularMarketPrice` (the currently
+*displayed* price - a genuinely live tick, not just this session's last
+*completed* bucket's close, which can lag it by up to a whole bucket's
+width - 8.5 min for Xetra) and `regularMarketDayHigh`/`regularMarketDayLow`
+(used only to *widen*, never shrink, the chart's auto-scaled vertical
+range - our own bucket data can undershoot the true day extremes early in a
+session, or during the reporting lag above, if the tick that set the real
+high/low hasn't landed in a completed bucket yet). Both fall back to the
+bucket-derived equivalent if Yahoo ever omits them. A small, expected
+side-effect: the header's displayed price and the chart's own rightmost
+point aren't guaranteed to match to the last cent at every instant - the
+header shows the most current number available, the chart shows the
+completed history, and that's a feature of using the more current source
+where it's actually more current, not a bug.
+
 Bucket width is sized dynamically per exchange - the *regular session
 length* (`sessionEnd - sessionStart`, which is stable day to day even
 though the exact start/end timestamps aren't reliable, see below), divided
@@ -823,10 +859,17 @@ convention real intraday stock apps use (Yahoo Finance, Robinhood, Google
 Finance): it's strictly more informative than a single colour, since a
 stock that dipped below its reference mid-session and recovered actually
 shows the dip instead of rendering as one solid colour for the entire
-chart. Area mode's fill stops at the reference line rather than running all
-the way to the chart's bottom edge - a below-reference point fills red only
-between the reference line and that point, not the panel's full height -
-matching the same real-world convention rather than one solid colour block
+chart. A connecting line whose two endpoints land on opposite sides of the
+reference is split exactly where it crosses it - green above the line, red
+below, precisely at the crossing pixel rather than the whole segment
+switching to whichever colour the *destination* point happens to be (the
+simpler alternative most point-to-point charts use, tried first here too,
+but a visibly worse look: a segment heading down into red territory would
+render red even for the portion still geometrically above the line). Area
+mode's fill stops at the reference line rather than running all the way to
+the chart's bottom edge - a below-reference point fills red only between
+the reference line and that point, not the panel's full height - matching
+the same real-world convention rather than one solid colour block
 regardless of which side of the reference the price sits on. Candlestick
 mode is deliberately **not** part of this: each candle keeps colouring
 itself by its own open vs. close within that time slice (the standard,

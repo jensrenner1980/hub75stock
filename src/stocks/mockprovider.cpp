@@ -42,10 +42,22 @@ StockSnapshot MockDataProvider::generateSession(const Symbol &symbol)
     StockSnapshot snapshot;
     snapshot.symbol = symbol;
     snapshot.marketOpen = true;
+    // No real currency to report for synthetic data - a light-touch guess
+    // from the exchange (only Xetra -> EUR is worth bothering with; every
+    // other mapped exchange in this project trades in USD) keeps mock mode
+    // showing a plausible currency symbol rather than defaulting every
+    // symbol to USD regardless of which exchange it's supposedly on.
+    snapshot.currency =
+        symbol.exchange() == QStringLiteral("XETR") ? QStringLiteral("EUR") : QStringLiteral("USD");
     snapshot.buckets.reserve(pricedata::kBucketCount);
 
     float price = startingPrice(symbol);
     snapshot.referencePrice = price;
+    // No exchange to report an authoritative day range for synthetic data -
+    // track it from the buckets as they're generated, same role as
+    // YahooDataProvider's fallback when Yahoo's own fields are missing.
+    float dayHigh = price;
+    float dayLow = price;
 
     for (int i = 0; i < pricedata::kBucketCount; ++i) {
         PriceBucket bucket;
@@ -59,11 +71,15 @@ StockSnapshot MockDataProvider::generateSession(const Symbol &symbol)
         const float wickDown = std::abs(randomStepFraction(rng_, 0.006f));
         bucket.high = std::max(bucket.open, bucket.close) * (1.0f + wickUp);
         bucket.low = std::max(0.01f, std::min(bucket.open, bucket.close) * (1.0f - wickDown));
+        dayHigh = std::max(dayHigh, bucket.high);
+        dayLow = std::min(dayLow, bucket.low);
 
         snapshot.buckets.append(bucket);
     }
 
     snapshot.lastPrice = price;
+    snapshot.dayHigh = dayHigh;
+    snapshot.dayLow = dayLow;
     return snapshot;
 }
 

@@ -292,7 +292,31 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     const float referencePrice = previousCloseValue > 0.0
                                      ? static_cast<float>(previousCloseValue)
                                      : aggregated.first().open;
-    const float lastPrice = aggregated.last().close;
+
+    // The displayed "current" price prefers Yahoo's own live
+    // regularMarketPrice over our last *completed* bucket's close - see
+    // StockSnapshot::lastPrice's own comment for why those two aren't
+    // required to match exactly. Falls back to the bucket close if that
+    // field is ever missing (0 is not a legitimate quoted price).
+    const double regularMarketPriceValue =
+        meta.value(QStringLiteral("regularMarketPrice")).toDouble(0.0);
+    const float lastPrice = regularMarketPriceValue > 0.0
+                                ? static_cast<float>(regularMarketPriceValue)
+                                : aggregated.last().close;
+
+    // Today's official day high/low, preferring Yahoo's own authoritative
+    // regularMarketDayHigh/Low - see StockSnapshot::dayHigh/dayLow's own
+    // comment for why (our own bucket data can undershoot the true
+    // extremes). Falls back to the highest/lowest bucket actually
+    // aggregated if either field is missing.
+    float bucketDayHigh = aggregated.first().high;
+    float bucketDayLow = aggregated.first().low;
+    for (const PriceBucket &bucket : aggregated) {
+        bucketDayHigh = std::max(bucketDayHigh, bucket.high);
+        bucketDayLow = std::min(bucketDayLow, bucket.low);
+    }
+    const double dayHighValue = meta.value(QStringLiteral("regularMarketDayHigh")).toDouble(0.0);
+    const double dayLowValue = meta.value(QStringLiteral("regularMarketDayLow")).toDouble(0.0);
 
     // Expand into a dense, chronologically-indexed array spanning every
     // slot from the session's first bucket up to the last one with real
@@ -323,11 +347,14 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     snapshot.symbol = symbol;
     snapshot.referencePrice = referencePrice;
     snapshot.lastPrice = lastPrice;
+    snapshot.dayHigh = dayHighValue > 0.0 ? static_cast<float>(dayHighValue) : bucketDayHigh;
+    snapshot.dayLow = dayLowValue > 0.0 ? static_cast<float>(dayLowValue) : bucketDayLow;
     snapshot.buckets = buckets;
     snapshot.sessionAnchorEpoch = firstTimestamp;
 
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     snapshot.marketOpen = sessionStart > 0 && now >= sessionStart && now <= sessionEnd;
+    snapshot.currency = meta.value(QStringLiteral("currency")).toString();
 
     byKey_.insert(symbol.toConfigString(), snapshot);
     lastFetchFailed_.insert(symbol.toConfigString(), false);
