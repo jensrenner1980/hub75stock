@@ -29,13 +29,27 @@ const Color kRed(255, 64, 64);
 const Color kWhite(255, 255, 255);
 const Color kGrey(140, 140, 140);
 
-// Deliberately a different palette from the stock colours above (no green/
-// red/white reuse) so the connectivity indicator reads as "system status",
-// never mistakeable for a price move at a glance.
-const Color kIndicatorNone(255, 0, 128);   // magenta - no WiFi link at all
-const Color kIndicatorWifiOnly(255, 140, 0); // amber - WiFi up, no internet
-const Color kIndicatorOnline(0, 140, 255);  // blue - online
-const Color kIndicatorDataIssue(255, 0, 0); // red - online, but data fetch is failing
+// The global connectivity indicator (row 1/column 1's corner only) is
+// purely a network-layer signal - red/blue/green for no-WiFi/WiFi-only/
+// online, deliberately reusing kRed/kGreen (a conscious choice, not an
+// oversight - see renderConnectivityIndicator()'s own comment for why data
+// health doesn't belong here at all any more). Blue is the one colour that
+// needs its own constant, since neither kRed nor kGreen fits "WiFi up, no
+// internet".
+const Color kIndicatorWifiOnly(0, 140, 255);
+
+// Per-symbol data-health tint for that symbol's own price/change (applied
+// on top of the normal market-state colour - see applyDataHealth()).
+// Deliberately amber, not red: red already means "price down" right next
+// to these same numbers, and a stale figure sitting in red would read as a
+// price move that didn't happen. Bright for "fetch succeeded, no data yet"
+// (a mild, usually-brief situation - confirmed for real: the first ~20-30
+// min after a session opens, before Yahoo's backend has published a bar);
+// dim for a genuine fetch error, reusing the same "dim = less certain"
+// language already used for gap-bridged chart lines elsewhere in this
+// file, so the more serious of the two situations reads as the *more*
+// uncertain one, not the brighter/more attention-grabbing one.
+const Color kAmber(255, 140, 0);
 
 Color dim(const Color &c, int divisor = 4)
 {
@@ -105,19 +119,20 @@ bool isStaleSession(qint64 sessionAnchorEpoch)
 }
 
 // Applies the configured closed-market styling on top of an otherwise-normal
-// colour choice, for everything *except* the last-price figure (see
-// applyPriceMarketState() below for that one) - the chart body and the
-// day's % change stay at full, undimmed colour the whole time the session
-// being shown is merely "after hours", not actually stale. They're still
-// exactly correct regardless of whether the market happens to be open right
-// now: the chart is a complete record of the whole day so far, and the
-// day's change is the real, final number once the session's over - neither
-// one is any less true for the market being closed, so neither dims for
-// that reason. Grey still applies once the session itself is stale (see
-// isStaleSession()) - a previous day's frozen close is a fundamentally
-// different situation, not just "closed for now". Normal always passes
-// normal through unchanged regardless of any of this; Blank is handled by
-// the caller (it skips drawing instead).
+// colour choice - the chart body and the day's % change (and, since the
+// price now always matches the change colour - see the price/change call
+// sites below - the price figure too) stay at full, undimmed colour the
+// whole time the session being shown is merely "after hours", not actually
+// stale. They're still exactly correct regardless of whether the market
+// happens to be open right now: the chart is a complete record of the whole
+// day so far, and the day's change (and the last price, which used to get
+// its own separate dimmed treatment here - deliberately retired in favour
+// of always matching the change colour, for a more uniform list view) is
+// the real, final number once the session's over. Grey still applies once
+// the session itself is stale (see isStaleSession()) - a previous day's
+// frozen close is a fundamentally different situation, not just "closed for
+// now". Normal always passes normal through unchanged regardless of any of
+// this; Blank is handled by the caller (it skips drawing instead).
 Color applyMarketState(const Color &normal, bool marketOpen, bool staleSession,
                        ClosedMarketStyle style)
 {
@@ -126,26 +141,23 @@ Color applyMarketState(const Color &normal, bool marketOpen, bool staleSession,
     return kGrey;
 }
 
-// Applies the configured closed-market styling to the last-price figure
-// specifically - the one element that dims for "after hours, same day" (see
-// applyMarketState() above for why everything else doesn't): unlike the
-// chart or the day's change, the last price genuinely stops being live the
-// moment the market closes and won't move again until the next session, so
-// it's the one number actually made less true by the market being shut.
-// Dimming just this, rather than the whole panel, keeps the display at
-// whatever brightness was configured for trading hours almost all the time,
-// with a small, specific cue instead of a broad visual shift twice a day.
-// Grey once the session itself is stale, same as everywhere else.
-Color applyPriceMarketState(const Color &normal, bool marketOpen, bool staleSession,
-                            ClosedMarketStyle style)
+// Overrides an otherwise-normal price/change colour with the amber
+// data-health tint (see kAmber's own comment for the bright/dim
+// reasoning), when the most recent fetch attempt for this specific symbol
+// had a problem. Takes priority over the market-state colour it's given -
+// an active fetch problem happening right now is a more urgent thing to
+// surface than plain after-hours/stale-session styling.
+Color applyDataHealth(const Color &normal, StockDataProvider::DataHealth health)
 {
-    if (marketOpen || style == ClosedMarketStyle::Normal)
+    switch (health) {
+    case StockDataProvider::DataHealth::Error:
+        return dim(kAmber);
+    case StockDataProvider::DataHealth::NoData:
+        return kAmber;
+    case StockDataProvider::DataHealth::Ok:
         return normal;
-    if (!staleSession)
-        return dim(normal, 2);
-    if (style == ClosedMarketStyle::Grey)
-        return kGrey;
-    return normal; // Blank is handled before we get here
+    }
+    return normal;
 }
 
 QString formatTicker(const Symbol &symbol)
@@ -204,25 +216,94 @@ QString formatChangePercent(float changePercent)
            + QString::number(std::abs(changePercent), 'f', 1);
 }
 
+// Formats a price into a fixed digit-character budget - 4 total under 100
+// (whole or fractional currency units don't need as much precision spelled
+// out as a genuinely volatile/cheap price does), 5 total at or above it -
+// distributing them between the integer and fractional parts by magnitude
+// rather than a fixed decimal count: more digits before the point leaves
+// fewer after it, down to none at all once the integer part alone reaches
+// the budget. So a cheap price shows more fractional precision (e.g.
+// "5.500", 1+3) and an expensive one shows less or none (e.g. "155.50",
+// 3+2; "99999", 5+0, also this function's cap - a real equity price that
+// high isn't expected, but the fixed-width layout needs a hard ceiling
+// regardless). This isn't just a formatting choice: since the price block
+// is right-aligned to a fixed end column (see README "Compact list mode"),
+// a shorter digit budget makes the *whole* block narrower, which shifts
+// the currency symbol before it further right automatically - no separate
+// positioning logic needed, that's just what right-alignment already does
+// with less content to fit.
+QString formatPriceFixedWidth(float price)
+{
+    const float capped = std::min(price, 99999.0f);
+    const int intDigits = QString::number(static_cast<qint64>(capped)).size();
+    const int digitBudget = intDigits <= 2 ? 4 : 5; // under 100 -> one fewer digit total
+    const int fracDigits = std::max(0, digitBudget - intDigits);
+    return QString::number(capped, 'f', fracDigits);
+}
+
+// Formats a daily change percentage into a sign plus exactly 2 digit
+// characters total - the fixed budget list mode's right-aligned change
+// block assumes: one decimal place while the magnitude is still a single
+// integer digit (e.g. "+6.7"), none once it reaches two (e.g. "+67") -
+// capped at +/-99%, a move that large not being expected for a real stock,
+// but, same as the price cap above, the fixed-width layout needs a hard
+// ceiling regardless. Checked against 9.95, not 10.0: a value just under 10
+// can round *up* to "10.0" at one decimal place, which would overflow the
+// two-digit budget by a character - checking against the rounded boundary
+// avoids that.
+QString formatChangePercentFixedWidth(float changePercent)
+{
+    const QString sign = changePercent >= 0.0f ? QStringLiteral("+") : QStringLiteral("-");
+    const float capped = std::min(std::abs(changePercent), 99.0f);
+    const int decimals = capped < 9.95f ? 1 : 0;
+    return sign + QString::number(capped, 'f', decimals);
+}
+
+// Advance for one glyph under the compressed-width rules drawCompressed()
+// and compressedWidth() both follow - kept as one shared table so the two
+// can never drift out of sync with each other. ' ' and '.' compress from
+// the font's normal 4px advance down to 2px (see drawCompressed()'s own
+// comment for why - the short version: a space has no ink to protect
+// anywhere, and a period's ink sits in column 1 of its cell, not 0, so
+// there's already a free column to reclaim). '%' advances only 3px - its
+// own true ink width, with no reserved trailing blank column - since it's
+// always the last glyph on its line in this layout, with nothing after it
+// that would need the usual 1px gap.
+int compressedAdvance(QChar ch)
+{
+    if (ch == QLatin1Char(' ') || ch == QLatin1Char('.'))
+        return 2;
+    if (ch == QLatin1Char('%'))
+        return 3;
+    return 4;
+}
+
+// Total width text would occupy under drawCompressed()'s own rules,
+// without drawing anything - used to right-align a block whose rendered
+// width depends on its actual content (e.g. how many digits a price needs).
+int compressedWidth(const QString &text)
+{
+    int width = 0;
+    for (const QChar &ch : text)
+        width += compressedAdvance(ch);
+    return width;
+}
+
 // Draws text one glyph at a time rather than as a single fixed-pitch
-// DrawText() call, compressing '.' and ' ' from the 4x6 font's normal 4px
-// advance down to 2px each - frees exactly the width list mode needs to fit
-// a currency symbol before the price and a "%" after the change, within the
-// panel's fixed 64px line (see README "Compact list mode" for the exact
-// budget: 18 logical characters at 4px each is 72px, and the two
-// guaranteed separator spaces plus the two guaranteed decimal points - one
-// in the price, one in the change - save exactly the 8px difference).
+// DrawText() call, applying compressedAdvance()'s per-glyph rules instead
+// of the font's normal uniform 4px pitch - frees exactly the width list
+// mode needs to fit a currency symbol before the price and a "%" after the
+// change, within the panel's fixed 64px line (see README "Compact list
+// mode" for the exact budget).
 //
-// A space has no ink in any column, so simply not drawing it and advancing
-// 2px is entirely safe. A '.' is different: its own ink sits in column 1 of
-// its 4-wide cell, not column 0 (confirmed from the font's own bitmap), so
-// it's drawn one column *before* its "natural" slot - landing flush against
-// whatever precedes it (already blank there, from that glyph's own trailing
-// column) while still leaving a full 1px gap before whatever follows.
-// Simply truncating its advance without shifting the draw position would
-// instead leave the dot flush against the *next* character instead of the
-// previous one - worse, since every other glyph pairing on the line keeps
-// its usual 1px gap.
+// A '.' is drawn one column *before* its "natural" slot, not just advanced
+// less: its own ink sits in column 1 of its cell, not column 0, so drawing
+// it shifted left lands the dot flush against whatever precedes it
+// (already blank there, from that glyph's own trailing column) while still
+// leaving a full 1px gap before whatever follows. Simply truncating the
+// advance without shifting the draw position would instead leave the dot
+// flush against the *next* character instead of the previous one - worse,
+// since every other glyph pairing on the line keeps its usual 1px gap.
 int drawCompressed(PanelView *panel, const rgb_matrix::Font &font, int x, int baseline,
                    const Color &color, const QString &text)
 {
@@ -235,31 +316,97 @@ int drawCompressed(PanelView *panel, const rgb_matrix::Font &font, int x, int ba
         const QString single(ch);
         rgb_matrix::DrawText(panel, font, isPeriod ? x - 1 : x, baseline, color, nullptr,
                              single.toUtf8().constData(), 0);
-        x += isPeriod ? 2 : 4;
+        x += compressedAdvance(ch);
     }
     return x;
 }
 
 // ---------------------------------------------------------------------------
-// List mode: up to 4 lines, 4x6 font, matching the list16 bring-up pattern's
-// layout exactly (see testpatterns.cpp / README "Compact list mode").
+// List mode: up to 4 lines, 4x6 font, three fixed-column blocks per line -
+// ticker, currency+price, change - each right- or left-aligned to its own
+// fixed anchor so the same content lines up column-for-column across every
+// row, not just left-aligned as one variable-width string. See README
+// "Compact list mode" for the full column-by-column derivation; verified
+// pixel-by-pixel against a hand-drawn reference mockup before implementing.
 // ---------------------------------------------------------------------------
+// Physical row capacity - 32px panel height / 8px line pitch (see README
+// "Compact list mode"). Distinct from limits::kMaxSymbolsPerDisplay, which
+// is how many symbols can be *assigned* to one display in total: once
+// there are more symbols than fit on screen at once, the visible window
+// scrolls through the rest instead of just truncating silently.
+constexpr int kListVisibleRows = 4;
+
+// A ticker longer than this is truncated (matching chart mode's own
+// `.left(5)`) - 4 characters get a 16px cell (4x4px, left-aligned, padded);
+// exactly 5 get a 20px cell instead of truncating a real 5-letter name down
+// to 4. Anything already <=4 characters is padded out to exactly 4, not 5,
+// so short tickers don't waste the extra column.
+constexpr int kListTickerMaxChars = 5;
+
+// Where the currency+price block's own last (always-blank) column lands -
+// 0-indexed, so this is "one past" that column, matching drawCompressed()'s
+// own return-value convention. The block is right-aligned here regardless
+// of how many digits the price actually needs, which is what guarantees at
+// least one blank column before it even in the worst case (a 5-character
+// ticker's own 20px cell ends at column 20, one column short of this
+// anchor minus the block's own max 26px width starting at column 20 too -
+// they'd collide at exactly one shared column without the ticker's own
+// built-in trailing blank column filling that gap; verified against a
+// hand-drawn reference image before relying on it).
+constexpr int kListPriceBlockEndX = 46;
+
+// Where the change block ends - the panel's own right edge (64), since
+// it's always the last content on the line and its own trailing glyph
+// ('%', via compressedAdvance()) already omits the usual reserved blank
+// column that would otherwise overshoot it.
+constexpr int kListChangeBlockEndX = limits::kPanelWidth;
+
 void renderList(PanelView *panel, const DisplayConfig &display, const GlobalConfig &global,
-                const StockDataProvider &data, const rgb_matrix::Font &font)
+                const StockDataProvider &data, const rgb_matrix::Font &font, qint64 elapsedMs)
 {
-    for (int line = 0; line < display.symbols.size() && line < limits::kMaxSymbolsPerDisplay;
-         ++line) {
-        const Symbol &symbol = display.symbols.at(line);
+    const int totalSymbols = display.symbols.size();
+    const int visibleRows = std::min(totalSymbols, kListVisibleRows);
+
+    // A one-row-per-tick scrolling window, on the same cadence chart mode
+    // already rotates symbols on - "the same delay as in chart view", per
+    // the feature request this implements. offset advances by exactly one
+    // symbol per rotationSeconds tick and wraps modulo totalSymbols, so
+    // row r always shows symbols[(offset + r) % totalSymbols]: row 0 shows
+    // the "oldest" visible symbol, row (visibleRows-1) the newest, and the
+    // symbol that just scrolled off the top reappears at the bottom
+    // exactly one tick later - a circular sliding window, not smooth pixel
+    // scrolling (deliberately: a discrete once-per-tick row swap fits this
+    // project's LED-matrix aesthetic and its existing rotation mechanic far
+    // better than continuous motion would). No rotation at all - offset
+    // always 0 - when everything already fits on screen at once, exactly
+    // matching the previous static behaviour for the common <=4-symbol
+    // case.
+    const qint64 dwellMs = std::max(1, global.rotationSeconds) * 1000LL;
+    const int offset = totalSymbols > kListVisibleRows
+                           ? static_cast<int>((elapsedMs / dwellMs) % totalSymbols)
+                           : 0;
+
+    for (int line = 0; line < visibleRows; ++line) {
+        const Symbol &symbol = display.symbols.at((offset + line) % totalSymbols);
         const int baseline = line * 8 + font.baseline() + 1;
-        const QString ticker = formatTicker(symbol);
+        const QString rawTicker = formatTicker(symbol).left(kListTickerMaxChars);
+        const int tickerCellChars = rawTicker.size() <= 4 ? 4 : 5;
+        const QString ticker = QStringLiteral("%1").arg(rawTicker, -tickerCellChars);
 
         const StockSnapshot *snapshot = data.snapshot(symbol);
         if (!snapshot || !snapshot->isValid()) {
-            // No data yet (e.g. just added to the config) - show the ticker,
-            // dashes for the rest, rather than nothing at all.
-            const QString text = QStringLiteral("%1 ---.-- ----").arg(ticker, -4);
+            // No data yet (e.g. just added to the config) - show the
+            // ticker in its normal position, dashes at the price/change
+            // anchors rather than nothing at all. Plain DrawText, not
+            // drawCompressed() - see the real-data path below for why.
             rgb_matrix::DrawText(panel, font, 0, baseline, kGrey, nullptr,
-                                 text.toUtf8().constData(), 0);
+                                 ticker.toUtf8().constData(), 0);
+            const QString priceDashes = QStringLiteral("-----");
+            drawCompressed(panel, font, kListPriceBlockEndX - compressedWidth(priceDashes),
+                           baseline, kGrey, priceDashes);
+            const QString changeDashes = QStringLiteral("--%");
+            drawCompressed(panel, font, kListChangeBlockEndX - compressedWidth(changeDashes),
+                           baseline, kGrey, changeDashes);
             continue;
         }
 
@@ -267,27 +414,41 @@ void renderList(PanelView *panel, const DisplayConfig &display, const GlobalConf
             continue;
 
         const bool stale = isStaleSession(snapshot->sessionAnchorEpoch);
-        const Color priceColor = applyPriceMarketState(kWhite, snapshot->marketOpen, stale,
-                                                       global.closedMarketStyle);
-        const Color changeColor = applyMarketState(trendColor(*snapshot), snapshot->marketOpen,
-                                                  stale, global.closedMarketStyle);
+        const StockDataProvider::DataHealth health = data.dataHealth(symbol);
+        const Color changeColor = applyDataHealth(
+            applyMarketState(trendColor(*snapshot), snapshot->marketOpen, stale,
+                            global.closedMarketStyle),
+            health);
+        // The price always matches the change colour - see applyMarketState()'s
+        // own comment for why the separate after-hours price dimming was
+        // retired in favour of this.
+        const Color priceColor = changeColor;
 
-        // Three separate draws, not one coloured string - the ticker stays
-        // plain white regardless of market state (same as chart mode's
-        // header always has), only the price dims for "after hours, same
-        // day" (see applyPriceMarketState()), and the change keeps its real
-        // trend colour throughout, dropping to grey only once the session
-        // itself is stale. Each segment starts where the previous one's
-        // drawCompressed() reports it actually ended.
-        int x = drawCompressed(panel, font, 0, baseline, kWhite,
-                               QStringLiteral("%1 ").arg(ticker, -4));
-        x = drawCompressed(
-            panel, font, x, baseline, priceColor,
-            currencySymbol(snapshot->currency)
-                + QStringLiteral("%1 ").arg(formatPrice(snapshot->lastPrice), 6));
-        drawCompressed(panel, font, x, baseline, changeColor,
-                       QStringLiteral("%1%")
-                           .arg(formatChangePercent(snapshot->dailyChangePercent()), 4));
+        // Ticker left-aligned at column 0, plain DrawText rather than
+        // drawCompressed() - the ticker never contains a period, and its
+        // padding is meant to fill its cell at the font's normal 4px
+        // pitch, not the 2px drawCompressed() would give a literal space
+        // (that compression is specifically for the deliberate separator/
+        // decimal spaces elsewhere, not structural padding here - using it
+        // would still render correctly, since padding is blank either way
+        // and nothing depends on exactly where it ends, but would silently
+        // stop matching the stated 16px/20px cell width). Price and change
+        // are each right-aligned to their own fixed anchor regardless of
+        // how wide their actual content is, which is what makes every row
+        // line up the same way rather than drifting with each symbol's own
+        // price magnitude.
+        rgb_matrix::DrawText(panel, font, 0, baseline, kWhite, nullptr,
+                             ticker.toUtf8().constData(), 0);
+
+        const QString priceText = currencySymbol(snapshot->currency)
+            + formatPriceFixedWidth(snapshot->lastPrice);
+        drawCompressed(panel, font, kListPriceBlockEndX - compressedWidth(priceText), baseline,
+                       priceColor, priceText);
+
+        const QString changeText =
+            formatChangePercentFixedWidth(snapshot->dailyChangePercent()) + QStringLiteral("%");
+        drawCompressed(panel, font, kListChangeBlockEndX - compressedWidth(changeText), baseline,
+                       changeColor, changeText);
     }
 }
 
@@ -300,8 +461,8 @@ constexpr int kChartBottom = 31;
 constexpr int kChartHeight = kChartBottom - kChartTop + 1; // 20 px
 
 void drawHeader(PanelView *panel, const Symbol &symbol, const StockSnapshot *snapshot,
-                const GlobalConfig &global, const rgb_matrix::Font &big,
-                const rgb_matrix::Font &small)
+                const GlobalConfig &global, const StockDataProvider &data,
+                const rgb_matrix::Font &big, const rgb_matrix::Font &small)
 {
     rgb_matrix::DrawText(panel, big, 0, big.baseline(), kWhite, nullptr,
                          formatTicker(symbol).left(5).toUtf8().constData(), 1);
@@ -314,10 +475,16 @@ void drawHeader(PanelView *panel, const Symbol &symbol, const StockSnapshot *sna
         return;
 
     const bool stale = isStaleSession(snapshot->sessionAnchorEpoch);
-    const Color changeColor = applyMarketState(trendColor(*snapshot), snapshot->marketOpen, stale,
-                                              global.closedMarketStyle);
-    const Color priceColor = applyPriceMarketState(kWhite, snapshot->marketOpen, stale,
-                                                  global.closedMarketStyle);
+    const StockDataProvider::DataHealth health = data.dataHealth(symbol);
+    const Color changeColor = applyDataHealth(
+        applyMarketState(trendColor(*snapshot), snapshot->marketOpen, stale,
+                        global.closedMarketStyle),
+        health);
+    // The price always matches the change colour - a deliberate
+    // simplification over the price having its own separate after-hours
+    // dimming, in favour of the two numbers always reading as one
+    // consistent unit at a glance.
+    const Color priceColor = changeColor;
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline(), priceColor,
                               currencySymbol(snapshot->currency) + formatPrice(snapshot->lastPrice));
     drawRightAlignedFixedWidth(panel, small, panel->width(), small.baseline() + 6, changeColor,
@@ -599,7 +766,7 @@ void renderChart(PanelView *panel, const DisplayConfig &display, const GlobalCon
     const Symbol &symbol = display.symbols.at(index);
     const StockSnapshot *snapshot = data.snapshot(symbol);
 
-    drawHeader(panel, symbol, snapshot, global, big, small);
+    drawHeader(panel, symbol, snapshot, global, data, big, small);
 
     if (!snapshot || !snapshot->isValid())
         return;
@@ -622,7 +789,7 @@ void renderStockPanel(PanelView *panel, const DisplayConfig &display, const AppC
 
     switch (display.mode) {
     case DisplayMode::StockList:
-        renderList(panel, display, config.global(), data, *small);
+        renderList(panel, display, config.global(), data, *small, elapsedMs);
         break;
     case DisplayMode::Line:
     case DisplayMode::Area:
@@ -632,19 +799,26 @@ void renderStockPanel(PanelView *panel, const DisplayConfig &display, const AppC
     }
 }
 
-void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state,
-                                 bool dataIssue)
+void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state)
 {
-    Color color = kIndicatorNone;
+    // Purely a network-layer signal now - data health used to be folded in
+    // here too (a fourth/fifth colour for "fetch is failing"), but that
+    // meant this one global indicator stayed stuck on the worst symbol's
+    // state even once other symbols had already recovered - confirmed
+    // confusing for real on live hardware. Data health now lives directly
+    // on each symbol's own price/change instead (see applyDataHealth()),
+    // which is both more precise (names *which* symbol) and doesn't lag
+    // behind individual recoveries the way one aggregate did.
+    Color color = kIndicatorWifiOnly;
     switch (state) {
     case ConnectivityMonitor::State::NoConnection:
-        color = kIndicatorNone;
+        color = kRed;
         break;
     case ConnectivityMonitor::State::WifiOnly:
         color = kIndicatorWifiOnly;
         break;
     case ConnectivityMonitor::State::Online:
-        color = dataIssue ? kIndicatorDataIssue : kIndicatorOnline;
+        color = kGreen;
         break;
     }
 

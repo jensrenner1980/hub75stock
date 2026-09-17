@@ -6,6 +6,7 @@
 #include <QtGlobal>
 
 #include "net/connectivitymonitor.h"
+#include "stocks/stockdataprovider.h"
 
 namespace rgb_matrix {
 class Font;
@@ -17,7 +18,6 @@ class AppConfig;
 class DisplayConfig;
 class FontStore;
 class PanelView;
-class StockDataProvider;
 struct StockSnapshot;
 
 // Draws one panel's worth of stock content - either the compact 4-symbol
@@ -37,15 +37,14 @@ void renderStockPanel(PanelView *panel, const DisplayConfig &display, const AppC
 // uses its panel's full 64x32 area, so there is no corner that's guaranteed
 // free in every mode.
 //
-// "dataIssue" is StockDataProvider::hasDataIssue() - a distinct fourth color
-// on top of the three network states, since a fetch can fail (Yahoo API
-// error, unexpected response shape) even while the network itself is
-// perfectly fine, and that's indistinguishable from an ordinary quiet chart
-// (market closed, or simply between minute bars) without it. Only shown when
-// the network state is Online - a network-layer problem already explains
-// why data isn't flowing, so it takes visual priority.
-void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state,
-                                 bool dataIssue);
+// Purely a network-layer signal - red/blue/green for no-WiFi/WiFi-only/
+// online. Data-fetch health (StockDataProvider::DataHealth) deliberately
+// isn't part of this any more - it's shown directly on each symbol's own
+// price/change instead (see stockrenderer.cpp's applyDataHealth()), which
+// names *which* symbol has a problem instead of one global aggregate that
+// lagged behind individual symbols recovering - confirmed confusing for
+// real on live hardware.
+void renderConnectivityIndicator(PanelView *panel, ConnectivityMonitor::State state);
 
 } // namespace hub75
 

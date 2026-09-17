@@ -325,13 +325,22 @@ physically sit on the wall is a human concern. Chains may differ in length -
 the library still needs a rectangular canvas, so it is sized to the longest
 chain and the unused tail of the shorter chains stays dark.
 
-`mode` is one of four equal, independent per-display choices - `list` (all
-stocks at once, no chart), or `line` / `area` / `candles` (one stock at a
-time, full panel, rotating every `rotationSeconds`). There is no separate
-global "chart style" setting: each panel picks its own mode, so one wall can
-freely mix a list panel with line/area/candlestick panels. Up to 4 symbols
-per panel (in `line`/`area`/`candles` mode, rotated through one at a time; in
-`list` mode, all shown at once).
+`mode` is one of four equal, independent per-display choices - `list` (a
+compact 4-line list), or `line` / `area` / `candles` (one stock at a time,
+full panel, rotating every `rotationSeconds`). There is no separate global
+"chart style" setting: each panel picks its own mode, so one wall can freely
+mix a list panel with line/area/candlestick panels. Up to
+`limits::kMaxSymbolsPerDisplay` (10) symbols per panel: `line`/`area`/
+`candles` mode rotates through all of them one at a time regardless of
+count; `list` mode shows 4 at once and, once there are more than 4 assigned,
+scrolls through the rest on the same `rotationSeconds` cadence - a one-row
+sliding window (row 0 shows the oldest visible symbol, row 3 the newest;
+the symbol that scrolls off the top reappears at the bottom exactly one
+tick after it left, not a new pass through the whole list) rather than
+smooth pixel scrolling, which fits this project's LED-matrix aesthetic (and
+its existing rotation mechanic) better than continuous motion would. With
+4 or fewer symbols assigned, list mode is exactly as static as it always
+was - the scrolling only ever kicks in once it's actually needed.
 
 Symbols use a provider-independent `EXCHANGE:TICKER` notation (`ASX:BRN`,
 `XETR:SAP`) or a bare ticker for US listings (`IONQ`). The exchange is
@@ -400,28 +409,99 @@ what the `list16` bring-up pattern itself demonstrates, and the font
 geometry above still holds exactly.
 
 The live list mode (`renderList()` in `stockrenderer.cpp`, as opposed to the
-`list16` bring-up pattern) has since grown two more glyphs into that same
-64px line - a currency symbol before the price (from
-`StockSnapshot::currency`, Yahoo's own reported ISO 4217 code: `$`/`€`/`£`/`¥`,
-or a generic `¤` for anything else) and a `%` after the change - via
-`drawCompressed()`, which draws glyph-by-glyph instead of one fixed-pitch
-call and compresses `.` and ` ` from their normal 4px advance down to 2px
-each. 18 logical characters at 4px would be 72px, 8px over budget; the two
-guaranteed separator spaces (free - a space has no ink to protect in any
-column) plus the two guaranteed decimal points (price always has one,
-change always has one) save exactly that 8px. A `.`'s own ink sits in
-column 1 of its cell, not column 0, so it's drawn one column *before* its
-normal slot rather than just advanced less - flush against whatever
-precedes it (already blank there) while still leaving the usual 1px gap
-before whatever follows, rather than the dot ending up flush against the
-*next* character instead.
+`list16` bring-up pattern) has since moved to three independently-aligned
+fixed-column blocks instead of one sequential left-to-right string, so the
+same three pieces of content line up column-for-column across every row
+regardless of how long a ticker name is or how many digits a price needs -
+the whole point being visual uniformity down the panel, not just fitting
+the width budget. Columns below are 0-indexed, matching the code:
 
-**Readability at this size**: the font uses real disambiguation tricks (a
-slashed `0` vs plain `O`, a flagged `1` vs barred `I` vs plain `L`, `Q`'s tail
-sitting outside the O/D silhouette) that hold up even at 3 px of actual ink.
-The one weak spot is **`S` vs `5`**, a single-pixel difference that may not
-survive LED diffusion - low practical risk here since digit fields and ticker
-fields never mix, but worth a look on real hardware before relying on it.
+* **Ticker**, left-aligned at column 0, plain fixed-pitch `DrawText()` (no
+  compression - see below for why that matters). 4 characters get a 16px
+  cell; a name that's exactly 5 characters after truncation (`.left(5)`,
+  same cap chart mode's header already uses) gets a 20px cell instead of
+  chopping a real 5-letter ticker down to 4. Shorter names are padded, not
+  centred, so the *start* of every ticker always lines up at column 0.
+* **Currency + price**, right-aligned so its own last (always-blank) column
+  lands on column 46 - regardless of ticker length or how many digits the
+  price needs, which is what guarantees at least one blank column between
+  the two blocks even in the worst case (a 5-character ticker's own cell
+  ends at column 20; verified for real, pixel-by-pixel, against a
+  hand-drawn reference mockup before relying on it - see below). The price
+  itself (`formatPriceFixedWidth()`) uses a fixed digit-character budget -
+  5 total at 100 or above, 4 total under it - split between the integer and
+  fractional parts by magnitude rather than a fixed decimal count:
+  `1234.5` (4+1), `39.33` (2+2, the 4-digit budget), `5.500` (1+3, also the
+  4-digit budget), `99999` (5+0, also the display cap - not a realistic
+  equity price, but the fixed-width layout needs a hard ceiling
+  regardless). The narrower 4-digit budget isn't just a formatting choice -
+  since this whole block is right-aligned to column 46 regardless of its
+  actual width, a shorter digit budget makes the block itself narrower,
+  which shifts the currency symbol before it 4px further right
+  automatically (verified for real: IONQ at $39.33 vs. AAPL at $333 landed
+  exactly 4 columns apart) - no separate positioning logic needed for that,
+  it's just what right-alignment already does with less content to fit.
+* **Change**, right-aligned to column 64 (the panel's own right edge, since
+  it's always the last content on the line). `formatChangePercentFixedWidth()`
+  uses a sign plus exactly 2 digit characters total - one decimal place
+  under 10% (`+6.7`), none at or above it (`+67`) - capped at ±99%.
+
+Both number formatters, and the currency symbol before the price, still run
+through `drawCompressed()` - the same glyph-by-glyph helper that compresses
+`.` and ` ` from the font's normal 4px advance down to 2px (a `.`'s own ink
+sits in column 1 of its cell, not column 0, so it's drawn one column
+*before* its normal slot - flush against whatever precedes it while still
+leaving the usual 1px gap before whatever follows, rather than the dot
+ending up flush against the *next* character instead), plus a third rule
+for `%` specifically: it advances only 3px, its own true ink width with no
+reserved trailing blank column, since it's always the very last glyph on
+its line with nothing after it that would need the usual gap. The ticker
+deliberately does *not* go through this - its padding is meant to fill a
+real 16px/20px cell at the font's normal pitch, and while drawing it
+compressed wouldn't actually cause a visible collision (padding is blank
+either way, and nothing depends on exactly where it ends), it would
+silently stop matching the stated cell width for no benefit.
+
+Each block's actual on-screen width varies with its content, so
+right-aligning it means computing that width *before* drawing - a second
+helper, `compressedWidth()`, mirrors `drawCompressed()`'s own per-glyph
+advance table without drawing anything, purely so the two can never drift
+out of sync with each other.
+
+Price and change always share one colour (see *Live data* below) - a
+deliberate simplification over the price ever having its own separate
+after-hours dimming, so the two numbers on each row always read as one
+consistent unit rather than two independently-styled elements.
+
+**Readability at this size**: the font uses real disambiguation tricks (`0`
+wider and flat-capped top and bottom vs plain rounded `O` - originally a
+literal slash through the middle instead, retired in favour of this
+because it reads as more consistent with the other digits and holds up
+better against `8` at this size; a flagged `1` vs barred `I` vs plain `L`;
+`Q`'s tail sitting outside the O/D silhouette) that hold up even at 3 px of
+actual ink. The one weak spot is **`S` vs `5`**, a single-pixel difference
+that may not survive LED diffusion - low practical risk here since digit
+fields and ticker fields never mix, but worth a look on real hardware
+before relying on it.
+
+**Scrolling through more than 4 symbols**: a display can have up to
+`limits::kMaxSymbolsPerDisplay` (10) symbols assigned, but only 4 rows
+physically fit. With more than 4, `renderList()` shows a one-row sliding
+window that advances by exactly one symbol every `rotationSeconds` - row *r*
+shows `symbols[(offset + r) % totalSymbols]`, with `offset` ticking forward
+on the same `elapsedMs`/`rotationSeconds` cadence chart mode already rotates
+symbols on. Deliberately a discrete once-per-tick row swap, not smooth pixel
+scrolling - fits the rest of this project's LED-matrix aesthetic (and its
+one existing rotation mechanic) better than continuous motion would, and
+needed no new timing concept, just reusing the one chart mode already had.
+Verified for real against the actual formula: exporting a 6-symbol list at
+four points in time and decoding the rendered glyphs pixel-by-pixel showed
+rows `A B C D` -> `B C D E` -> `C D E F` -> `E F A B` - each tick shifting
+the window by one, and the wrap-around (`F` looping back to `A`/`B` rather
+than running off the end) landing exactly where the formula predicts. With
+4 or fewer symbols assigned, `offset` stays 0 always - list mode is exactly
+as static as it always was; the scrolling only engages once it's actually
+needed.
 
 ### Single-stock chart header (`chart-header-stacked`, `chart-header-inline`)
 
@@ -681,18 +761,33 @@ seconds, showing WiFi/internet state at a glance without needing to pull up
 
 | Colour            | Meaning                                  |
 |-------------------|-------------------------------------------|
-| magenta (255,0,128) | no WiFi link at all                      |
-| amber (255,140,0)   | WiFi connected, but no internet reachable |
-| blue (0,140,255)    | online                                    |
+| red (255,64,64)   | no WiFi link at all                      |
+| blue (0,140,255)  | WiFi connected, but no internet reachable |
+| green (0,255,96)  | online                                   |
 
-Deliberately *not* the red/green/white/grey already used for stock
-colouring, so a glance at the corner never reads as a price move. Backed by
-`nmcli` (device state for the WiFi link, `nmcli -t -g CONNECTIVITY general`
-for actual internet reachability, which is NetworkManager's own periodic
-check and already handles captive portals etc.) rather than a second,
-separate reachability probe - consistent with the rest of the project's
-WiFi handling (see `provisioning/`), and the calls run fully asynchronously
-so a slow or hung `nmcli` never stalls the render loop.
+Purely a network-layer signal, deliberately - data-fetch health used to be
+folded into this same indicator as a fourth/fifth colour, but that meant
+the one global indicator stayed stuck on the worst symbol's state even
+once *other* symbols had already recovered - confirmed confusing for real
+on live hardware (a config with a mix of US and Xetra symbols, watched
+across a real Xetra session open: some tickers had fresh data again while
+the corner was still amber, because it was reporting the worst case across
+every tracked symbol, not just the ones actually recovering). Data health
+now lives directly on each affected symbol's own price/change instead (see
+below) - more precise, since it names *which* symbol has a problem, and it
+can't lag behind individual recoveries the way one aggregate did. Reuses
+the same green/red the stock colouring already uses (an earlier version of
+this project used a dedicated palette specifically to avoid that overlap,
+then deliberately switched to this instead - green/red mean "good"/"bad"
+consistently everywhere on the wall, this corner included).
+
+Backed by `nmcli` (device state for the WiFi link, `nmcli -t -g
+CONNECTIVITY general` for actual internet reachability, which is
+NetworkManager's own periodic check and already handles captive portals
+etc.) rather than a second, separate reachability probe - consistent with
+the rest of the project's WiFi handling (see `provisioning/`), and the
+calls run fully asynchronously so a slow or hung `nmcli` never stalls the
+render loop.
 
 Every display mode uses its panel's entire 64x32 area, so there is no corner
 that's guaranteed free of stock content in every mode - the indicator is
@@ -814,22 +909,50 @@ metadata's session start." Comparing the session's own anchor timestamp
 against the viewer's local calendar date does distinguish them.
 
 After today's own close but still the same calendar day ("after hours"),
-only the **last-price figure** dims - the ticker, the day's % change, and
+nothing dims at all - the ticker, the last price, the day's % change, and
 the chart itself all stay at full, undimmed colour. That's deliberate, not
-an oversight: the last price is the one number that's genuinely only true
-while the market's open (it stops moving the instant the session ends,
-won't move again until the next one starts), while the day's % change is
-still exactly correct once the session is over and the chart is a complete,
-accurate record of the whole day regardless of when you're looking at it -
-neither one is made any less true by the market being closed, so neither
-dims for that reason. The result: the display stays at whatever brightness
-was configured for trading hours almost all the time, with one small,
-specific cue (`applyPriceMarketState()` vs. `applyMarketState()` for
-everything else, in `stockrenderer.cpp`) rather than a broad visual shift
-twice a day. `marketClosed: "normal"`/`"blank"` are unaffected by any of
-this - `"normal"` never overrides colour regardless of staleness, `"blank"`
-blanks the panel the whole time the market isn't open regardless of
-staleness.
+an oversight: none of them are made any less true by the market being
+closed - the chart is a complete record of the whole day regardless of
+when you're looking at it, the day's % change is still exactly correct
+once the session is over, and (an earlier version of this project had the
+last price dim on its own here, on the reasoning that it's the one number
+that stops moving once the session ends - since retired in favour of
+always matching the change colour, so the two read as one consistent unit
+on every row instead of two independently-styled elements; see *Compact
+list mode* above) the last price is simply whatever it closed at, same as
+the rest. `marketClosed: "grey"` still applies once the session itself is
+stale (see above), and `"normal"`/`"blank"` are unaffected by any of this
+either way - `"normal"` never overrides colour regardless of staleness,
+`"blank"` blanks the panel the whole time the market isn't open regardless
+of staleness.
+
+A symbol whose most recent fetch attempt had a problem
+(`StockDataProvider::DataHealth`, queried per-symbol from the provider, not
+a wall-wide aggregate - see *Connectivity status indicator* above for why)
+gets its price and change tinted amber instead - `applyDataHealth()` in
+`stockrenderer.cpp`, applied on top of whatever colour the market-state
+logic above already picked, in both list and chart mode. Deliberately
+amber, not red: red already means "price down" right next to these same
+numbers, and a stale figure shown in red would read as a price move that
+never actually happened. Two shades distinguish two genuinely different
+situations, both confirmed for real: bright amber for `DataHealth::NoData`
+(the fetch succeeded, Yahoo just hasn't published any bars yet - seen for
+real for the first ~20-30 minutes after a Xetra session's own 09:00 CEST
+open), dim amber for `DataHealth::Error` (an actual failure - a network
+error, a timeout, or Yahoo itself returning an API-level error object,
+logged via `qWarning()` in `YahooDataProvider::handleReply()` and visible
+in `journalctl -u hub75stock` under the systemd service). Reuses the same
+"dim = less certain" language gap-bridged chart lines already use elsewhere
+in this file, so the more serious of the two situations reads as the *more*
+uncertain one rather than the brighter, more attention-grabbing one.
+Crucially, this never discards the price itself the way falling back to a
+dashed placeholder would - a fetch problem is usually transient (self-heals
+on the next successful poll, same as everywhere else in this provider), and
+the last-known price is still useful context during that window, just
+flagged as possibly stale. Dashes are reserved for a symbol that's *never*
+successfully fetched at all (a freshly-added or genuinely broken config
+entry), a different, more absolute situation that amber tinting a
+previously-good number doesn't apply to.
 
 A thinly-traded listing can have long stretches with no trades at all
 (confirmed for real testing `IONQ`'s Xetra cross-listing - most exchanges

@@ -16,7 +16,13 @@ constexpr int kPanelWidth = 64;            // LEDs per panel, horizontally
 constexpr int kPanelHeight = 32;           // LEDs per panel, vertically
 constexpr int kMaxChains = 3;              // parallel electrical chains
 constexpr int kMaxDisplaysPerChain = 5;    // panels daisy-chained per chain
-constexpr int kMaxSymbolsPerDisplay = 4;   // stocks shown on one panel
+// Stocks assignable to one panel/display in total - not the same thing as
+// how many rows fit on screen at once (see stockrenderer.cpp's
+// kListVisibleRows). Chart mode rotates through all of them one at a time
+// regardless; list mode shows kListVisibleRows at a time and scrolls
+// through the rest on the same rotationSeconds cadence once there are more
+// symbols than rows.
+constexpr int kMaxSymbolsPerDisplay = 10;
 } // namespace limits
 
 // How a single panel presents its stocks - each display picks exactly one of

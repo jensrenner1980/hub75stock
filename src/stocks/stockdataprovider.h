@@ -30,14 +30,30 @@ public:
     // nullptr if the symbol hasn't produced any data yet.
     virtual const StockSnapshot *snapshot(const Symbol &symbol) const = 0;
 
-    // True if the most recent fetch attempt for any tracked symbol failed
-    // (network error, or Yahoo itself returning an API-level error) - drives
-    // the on-screen connectivity indicator's fourth state, distinguishing
-    // "network is fine but the data source is failing" from an ordinary
-    // quiet chart (market closed, or between minute bars). Defaults to false
-    // so MockDataProvider - which never fails - doesn't need to override
-    // this at all.
-    virtual bool hasDataIssue() const { return false; }
+    // Outcome of the most recent fetch attempt for this specific symbol -
+    // drives a per-symbol tint on that symbol's own price/change (see
+    // stockrenderer.cpp's applyDataHealth()), not a wall-wide aggregate:
+    // an earlier version of this rolled every symbol's health into one
+    // global indicator, but that meant the single indicator stayed stuck
+    // on the worst symbol's state even once other symbols had already
+    // recovered - confirmed confusing for real on live hardware. Two
+    // genuinely different situations, both confirmed for real:
+    //   - Error: the fetch itself failed (a network error, or Yahoo
+    //     returning an API-level error object) - something is actually
+    //     wrong.
+    //   - NoData: the fetch succeeded (200 OK, no error object) but came
+    //     back with no usable bars - confirmed for real right at a Xetra
+    //     session's 09:00 open, before Yahoo's own backend has published
+    //     the new session's first minute bar yet. Not an error - the data
+    //     just doesn't exist upstream yet - so it shouldn't read as one.
+    // Defaults to Ok so MockDataProvider - which never fails - doesn't need
+    // to override this at all.
+    enum class DataHealth { Ok, NoData, Error };
+    virtual DataHealth dataHealth(const Symbol &symbol) const
+    {
+        Q_UNUSED(symbol);
+        return DataHealth::Ok;
+    }
 };
 
 } // namespace hub75

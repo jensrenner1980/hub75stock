@@ -37,7 +37,7 @@ public:
     void ensureSymbols(const QVector<Symbol> &symbols) override;
     void update() override;
     const StockSnapshot *snapshot(const Symbol &symbol) const override;
-    bool hasDataIssue() const override;
+    DataHealth dataHealth(const Symbol &symbol) const override;
 
 private:
     void fetchNext();
@@ -51,7 +51,7 @@ private:
     // handleReply(), never cleared elsewhere, so a symbol with no entry yet
     // (nothing has completed since startup) correctly reads as "no known
     // issue" rather than a false-positive error at boot.
-    QHash<QString, bool> lastFetchFailed_;
+    QHash<QString, DataHealth> lastFetchHealth_;
     int inFlight_ = 0;
 };
 

@@ -65,7 +65,14 @@ void YahooDataProvider::update()
     // interval (see updateIntervalSeconds) actually makes a connection
     // going stale between polls *more* likely, not less, so this matters
     // more now than it would have at a fixed 60s cadence, not less.
-    if (hasDataIssue())
+    bool anyIssueLastRound = false;
+    for (auto it = lastFetchHealth_.constBegin(); it != lastFetchHealth_.constEnd(); ++it) {
+        if (it.value() != DataHealth::Ok) {
+            anyIssueLastRound = true;
+            break;
+        }
+    }
+    if (anyIssueLastRound)
         network_.clearConnectionCache();
 
     // Refills the queue with every known symbol; fetchNext() drains it
@@ -123,7 +130,7 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     if (reply->error() != QNetworkReply::NoError) {
         qWarning() << "YahooDataProvider: fetch failed for" << symbol.toConfigString()
                    << "-" << reply->errorString();
-        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::Error);
         return;
     }
 
@@ -133,13 +140,13 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     if (!chartError.isNull()) {
         qWarning() << "YahooDataProvider: Yahoo returned an error for" << symbol.toConfigString()
                    << "-" << chartError;
-        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::Error);
         return;
     }
     const QJsonArray results = chart.value(QStringLiteral("result")).toArray();
     if (results.isEmpty()) {
         qWarning() << "YahooDataProvider: empty result array for" << symbol.toConfigString();
-        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::NoData);
         return;
     }
 
@@ -149,8 +156,15 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     const QJsonArray quoteArr = result.value(QStringLiteral("indicators")).toObject()
                                       .value(QStringLiteral("quote")).toArray();
     if (timestamps.isEmpty() || quoteArr.isEmpty()) {
-        qWarning() << "YahooDataProvider: no timestamp/quote data for" << symbol.toConfigString();
-        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        // Confirmed for real: happens right at a session's own open (e.g.
+        // Xetra, 09:00 CEST), before Yahoo's backend has published the new
+        // session's first minute bar yet - not an error, the request
+        // genuinely succeeded, the data just doesn't exist upstream yet.
+        // Self-resolves once real bars start flowing, typically within
+        // about half an hour.
+        qWarning() << "YahooDataProvider: no timestamp/quote data yet for"
+                   << symbol.toConfigString();
+        lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::NoData);
         return;
     }
 
@@ -272,7 +286,7 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     if (aggregated.isEmpty()) {
         qWarning() << "YahooDataProvider: response for" << symbol.toConfigString()
                    << "had no usable (non-null) bars - keeping previous snapshot";
-        lastFetchFailed_.insert(symbol.toConfigString(), true);
+        lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::NoData);
         return;
     }
 
@@ -357,7 +371,7 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     snapshot.currency = meta.value(QStringLiteral("currency")).toString();
 
     byKey_.insert(symbol.toConfigString(), snapshot);
-    lastFetchFailed_.insert(symbol.toConfigString(), false);
+    lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::Ok);
 }
 
 const StockSnapshot *YahooDataProvider::snapshot(const Symbol &symbol) const
@@ -366,13 +380,10 @@ const StockSnapshot *YahooDataProvider::snapshot(const Symbol &symbol) const
     return it == byKey_.constEnd() ? nullptr : &it.value();
 }
 
-bool YahooDataProvider::hasDataIssue() const
+StockDataProvider::DataHealth YahooDataProvider::dataHealth(const Symbol &symbol) const
 {
-    for (auto it = lastFetchFailed_.constBegin(); it != lastFetchFailed_.constEnd(); ++it) {
-        if (it.value())
-            return true;
-    }
-    return false;
+    const auto it = lastFetchHealth_.constFind(symbol.toConfigString());
+    return it == lastFetchHealth_.constEnd() ? DataHealth::Ok : it.value();
 }
 
 } // namespace hub75

@@ -471,7 +471,7 @@ int main(int argc, char *argv[])
             if (display)
                 hub75::renderStockPanel(panel, *display, config, *stockData, fonts, elapsedMs);
             if (showConnectivityIndicator && panel->row() == 1 && panel->column() == 1)
-                hub75::renderConnectivityIndicator(panel, connectivityState, stockData->hasDataIssue());
+                hub75::renderConnectivityIndicator(panel, connectivityState);
         }
     };
 
