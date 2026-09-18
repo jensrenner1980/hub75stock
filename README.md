@@ -954,6 +954,28 @@ successfully fetched at all (a freshly-added or genuinely broken config
 entry), a different, more absolute situation that amber tinting a
 previously-good number doesn't apply to.
 
+A third situation looks like `NoData` at first (empty `timestamp`/`quote`
+arrays) but isn't transient at all: some instrument types simply have no
+intraday bars available on Yahoo's free feed, ever - confirmed for real for
+`STU:EWG2` (EUWAX Gold II, an ETC that Yahoo classifies internally as
+`MUTUALFUND`), where requesting `interval=1m` gets silently answered with
+`dataGranularity: "1d"` instead, and `1d`/`5d` are missing entirely from
+`validRanges` - a permanent characteristic of the security, not a session
+that just hasn't started publishing bars yet. `YahooDataProvider` detects
+this (`dataGranularity` not matching what was requested) and builds a real
+snapshot from `meta` alone instead - `regularMarketPrice`, `previousClose`,
+`regularMarketDayHigh`/`Low`, current market-open state - with `buckets`
+left empty and health `Ok`, not `NoData`: the price is genuinely current,
+there's just no minute-by-minute history behind it. `StockSnapshot::isValid()`
+deliberately doesn't require non-empty buckets for exactly this reason -
+`drawChart()` already guards against drawing an empty bucket array on its
+own, so list mode and the chart header show a real, correctly-coloured
+price for a symbol like this, just with an empty chart body underneath in
+chart mode. Since there are no bars, `sessionAnchorEpoch` (normally the
+first bar's own timestamp) falls back to `meta.regularMarketTime` instead -
+the same role, just anchored on when the price was last updated rather than
+when the session's data started.
+
 A thinly-traded listing can have long stretches with no trades at all
 (confirmed for real testing `IONQ`'s Xetra cross-listing - most exchanges
 list foreign stocks under their own internal code rather than the

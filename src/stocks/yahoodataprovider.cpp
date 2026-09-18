@@ -155,7 +155,60 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     const QJsonArray timestamps = result.value(QStringLiteral("timestamp")).toArray();
     const QJsonArray quoteArr = result.value(QStringLiteral("indicators")).toObject()
                                       .value(QStringLiteral("quote")).toArray();
+
+    const QJsonObject regularPeriod = meta.value(QStringLiteral("currentTradingPeriod")).toObject()
+                                           .value(QStringLiteral("regular")).toObject();
+    const qint64 sessionStart = regularPeriod.value(QStringLiteral("start")).toInteger();
+    const qint64 sessionEnd = regularPeriod.value(QStringLiteral("end")).toInteger();
+
     if (timestamps.isEmpty() || quoteArr.isEmpty()) {
+        // Some instrument types simply don't have intraday bars available
+        // at all, ever - confirmed for real for an ETC (EUWAX Gold II,
+        // XETR:EWG2/STU:EWG2) that Yahoo classifies internally as
+        // MUTUALFUND: it silently answers with a coarser dataGranularity
+        // than the "1m" requested, rather than an empty timestamp array
+        // for what should be today's data - a permanent characteristic of
+        // the instrument, not a transient "no bars yet" gap. In that case
+        // a real snapshot is still built from meta alone (current price,
+        // reference price, day range, market-open state) rather than the
+        // NoData/amber treatment below - the chart itself stays empty (no
+        // buckets to draw), but the price/change header is accurate and
+        // current, which meta already has regardless of intraday support.
+        const bool noIntradaySupport =
+            meta.value(QStringLiteral("dataGranularity")).toString() != QStringLiteral("1m");
+        const double metaPriceValue =
+            meta.value(QStringLiteral("regularMarketPrice")).toDouble(0.0);
+        if (noIntradaySupport && metaPriceValue > 0.0) {
+            const double metaPrevCloseValue = meta.value(QStringLiteral("previousClose"))
+                                                   .toDouble(meta.value(QStringLiteral("chartPreviousClose"))
+                                                                 .toDouble(metaPriceValue));
+            const double metaDayHighValue =
+                meta.value(QStringLiteral("regularMarketDayHigh")).toDouble(metaPriceValue);
+            const double metaDayLowValue =
+                meta.value(QStringLiteral("regularMarketDayLow")).toDouble(metaPriceValue);
+
+            StockSnapshot snapshot;
+            snapshot.symbol = symbol;
+            snapshot.referencePrice = static_cast<float>(metaPrevCloseValue);
+            snapshot.lastPrice = static_cast<float>(metaPriceValue);
+            snapshot.dayHigh = static_cast<float>(metaDayHighValue);
+            snapshot.dayLow = static_cast<float>(metaDayLowValue);
+            snapshot.currency = meta.value(QStringLiteral("currency")).toString();
+            // No bars to anchor on - meta.regularMarketTime (when this
+            // price was last updated) is the next best thing for "is this
+            // actually today's data", the same role firstTimestamp plays
+            // for the normal, bar-backed path below.
+            snapshot.sessionAnchorEpoch = meta.value(QStringLiteral("regularMarketTime")).toInteger();
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            snapshot.marketOpen = sessionStart > 0 && now >= sessionStart && now <= sessionEnd;
+            // buckets left empty - no intraday history to draw, only the
+            // header has real content for a symbol like this.
+
+            byKey_.insert(symbol.toConfigString(), snapshot);
+            lastFetchHealth_.insert(symbol.toConfigString(), DataHealth::Ok);
+            return;
+        }
+
         // Confirmed for real: happens right at a session's own open (e.g.
         // Xetra, 09:00 CEST), before Yahoo's backend has published the new
         // session's first minute bar yet - not an error, the request
@@ -173,11 +226,6 @@ void YahooDataProvider::handleReply(const Symbol &symbol, QNetworkReply *reply)
     const QJsonArray highs = quote.value(QStringLiteral("high")).toArray();
     const QJsonArray lows = quote.value(QStringLiteral("low")).toArray();
     const QJsonArray closes = quote.value(QStringLiteral("close")).toArray();
-
-    const QJsonObject regularPeriod = meta.value(QStringLiteral("currentTradingPeriod")).toObject()
-                                           .value(QStringLiteral("regular")).toObject();
-    const qint64 sessionStart = regularPeriod.value(QStringLiteral("start")).toInteger();
-    const qint64 sessionEnd = regularPeriod.value(QStringLiteral("end")).toInteger();
 
     // Aggregate 1-minute bars into buckets, keyed by elapsed time since the
     // first returned bar - deliberately not

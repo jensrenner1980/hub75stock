@@ -25,6 +25,7 @@ const QHash<QString, QString> &yahooSuffixes()
         { QStringLiteral("XETRA"),  QStringLiteral(".DE") },
         { QStringLiteral("FWB"),    QStringLiteral(".F")  },
         { QStringLiteral("FRA"),    QStringLiteral(".F")  },
+        { QStringLiteral("STU"),    QStringLiteral(".SG") },
         { QStringLiteral("LSE"),    QStringLiteral(".L")  },
         { QStringLiteral("EURONEXT"), QStringLiteral(".AS") },
         { QStringLiteral("AMS"),    QStringLiteral(".AS") },

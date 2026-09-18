@@ -110,7 +110,16 @@ struct StockSnapshot {
         return referencePrice != 0.0f ? (dailyChange() / referencePrice) * 100.0f : 0.0f;
     }
     bool isUp() const { return dailyChange() >= 0.0f; }
-    bool isValid() const { return symbol.isValid() && !buckets.isEmpty(); }
+    // Deliberately doesn't require non-empty buckets: a symbol whose
+    // instrument type has no intraday chart data at all on Yahoo's free
+    // feed (confirmed for real: an ETC classified internally as
+    // MUTUALFUND) still gets a real snapshot built from meta alone - see
+    // YahooDataProvider::handleReply()'s own comment - with buckets left
+    // empty on purpose. drawChart() already guards against an empty
+    // buckets array on its own, so list mode and the chart header still
+    // show real price/change for a symbol like this instead of falling
+    // back to the "never fetched at all" placeholder.
+    bool isValid() const { return symbol.isValid() && lastPrice > 0.0f; }
 };
 
 } // namespace hub75
