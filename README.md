@@ -995,7 +995,15 @@ real segments already are (green/red/white live or after-hours, grey only
 for a stale session styled that way) rather than a separate hardwired colour -
 that reads as "less certain", needs no special-casing against the
 closed-market grey styling, and doesn't reuse a hue already spoken for by
-the [connectivity indicator](#connectivity-status-indicator).
+the [connectivity indicator](#connectivity-status-indicator). The two real
+data points bridged by a dimmed segment always keep their own pixel at full
+brightness regardless - only the line *between* them reads as uncertain, the
+samples themselves never do. Area mode's fill now spans the bridged gap too
+(interpolated between the two real points, same dim treatment as the line)
+rather than leaving a blank notch where the fill used to simply stop; the
+fill itself stays dim everywhere, real point or bridged gap alike, so it
+always reads as a background wash under the bright line rather than a
+second bright data series.
 
 Line/area mode colours **per point, relative to the session's reference
 price** - green above it, red below - rather than one verdict for the whole

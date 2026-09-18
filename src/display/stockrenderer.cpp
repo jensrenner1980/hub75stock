@@ -525,6 +525,19 @@ void drawCandles(PanelView *panel, const QVector<PriceBucket> &buckets, int star
     }
 }
 
+// Shared by every fill draw in drawLineOrArea() below - a real point's own
+// column and a bridged no-trades gap's interpolated column both stop one row
+// short of referenceY on either side, for the same reason (see the call
+// sites' own comments): painting through it would hide drawReferenceLine()'s
+// dashed marker.
+void fillColumnToBaseline(PanelView *panel, int x, int y, int referenceY, const Color &color)
+{
+    if (y <= referenceY - 2)
+        rgb_matrix::DrawLine(panel, x, y + 1, x, referenceY - 1, color);
+    else if (y >= referenceY + 2)
+        rgb_matrix::DrawLine(panel, x, referenceY + 1, x, y - 1, color);
+}
+
 void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int startColumn,
                     float minPrice, float maxPrice, float referencePrice, bool marketOpen,
                     bool staleSession, ClosedMarketStyle closedStyle, bool filled)
@@ -575,11 +588,9 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         // the real baseline-chart convention this whole thing is modelled
         // on rather than one solid colour block from top to bottom
         // regardless of which side of the baseline the price actually sits
-        // on. Every "x" reaching this point is a real data point's own
-        // column - the gap columns in between were already skipped via
-        // `continue` above and never get a fill drawn for them at all,
-        // bridged or not - so there's no "solid block spanning the gap" to
-        // withhold here either.
+        // on. Always dim, even for a real point's own column - the fill is
+        // meant to read as a background wash under the bright line, not a
+        // second bright data series.
         //
         // The fill deliberately never reaches referenceY itself (stops one
         // row short on either side) - filling all the way through it
@@ -590,14 +601,35 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
         // as an actual dash where the dash pattern lands, and as a thin gap
         // in the fill elsewhere, which reads as a continuous baseline groove
         // across the whole chart width instead of just isolated dashes.
-        if (filled) {
-            const Color fillColor = dim(pointColor);
-            if (y <= referenceY - 2)
-                rgb_matrix::DrawLine(panel, x, y + 1, x, referenceY - 1, fillColor);
-            else if (y >= referenceY + 2)
-                rgb_matrix::DrawLine(panel, x, referenceY + 1, x, y - 1, fillColor);
-            // Within one row of the baseline (or exactly on it): nothing to
-            // fill without touching referenceY itself.
+        if (filled)
+            fillColumnToBaseline(panel, x, y, referenceY, dim(pointColor));
+
+        // A bridged no-trades gap gets its fill too, interpolated linearly
+        // between the two real points on either side of it - otherwise the
+        // fill vanished across exactly the stretch bridgesGap already flags
+        // as "no data here", leaving a distracting blank notch in an
+        // otherwise continuous-looking area chart. Split at the same
+        // baseline-crossing x used for the line itself just below, so a gap
+        // that bridges from above the baseline to below it still fills each
+        // side in its own colour rather than one colour for the whole span.
+        if (filled && bridgesGap) {
+            const bool gapCrosses = (prevColor.r != pointColor.r || prevColor.g != pointColor.g
+                                     || prevColor.b != pointColor.b)
+                                    && y != prevY;
+            const int crossX = gapCrosses
+                ? prevX
+                    + static_cast<int>(std::lround((referenceY - prevY)
+                                                    / static_cast<float>(y - prevY) * (x - prevX)))
+                : -1;
+            for (int gapIndex = prevIndex + 1; gapIndex < i; ++gapIndex) {
+                const int gapX = startColumn + gapIndex;
+                if (gapX < 0 || gapX >= panel->width())
+                    continue;
+                const float t = static_cast<float>(gapX - prevX) / static_cast<float>(x - prevX);
+                const int gapY = prevY + static_cast<int>(std::lround(t * (y - prevY)));
+                const Color gapColor = dim(gapCrosses && gapX >= crossX ? pointColor : prevColor);
+                fillColumnToBaseline(panel, gapX, gapY, referenceY, gapColor);
+            }
         }
 
         // A segment whose two endpoints land on opposite sides of the
@@ -624,6 +656,16 @@ void drawLineOrArea(PanelView *panel, const QVector<PriceBucket> &buckets, int s
             const Color segmentColor = bridgesGap ? dim(pointColor) : pointColor;
             rgb_matrix::DrawLine(panel, prevX, prevY, x, y, segmentColor);
         } else {
+            panel->SetPixel(x, y, pointColor.r, pointColor.g, pointColor.b);
+        }
+        // The line just drawn between them reads as dim/uncertain when it
+        // bridges a no-trades gap, but the two real points it connects are
+        // never uncertain - re-assert them at full brightness afterwards so
+        // a real sample is never mistaken for a gap just because the line
+        // leading into or out of it happened to be dimmed. DrawLine's own
+        // endpoint pixels would otherwise stay at the dimmed segment colour.
+        if (bridgesGap) {
+            panel->SetPixel(prevX, prevY, prevColor.r, prevColor.g, prevColor.b);
             panel->SetPixel(x, y, pointColor.r, pointColor.g, pointColor.b);
         }
         prevX = x;
